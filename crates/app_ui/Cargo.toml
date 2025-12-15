@@ -1,0 +1,32 @@
+[package]
+name = "app_ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+app_core = { path = "../app_core" }
+app_fs = { path = "../app_fs" }
+app_db = { path = "../app_db" }
+
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+
+# GUI
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+# Image
+image.workspace = true
+
+# Text rendering
+cosmic-text.workspace = true
+
+# Utils
+bytemuck = { version = "1.19", features = ["derive"] }
+chrono.workspace = true

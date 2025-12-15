@@ -1,0 +1,26 @@
+[package]
+name = "app_fs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+xxhash-rust.workspace = true
+chardetng.workspace = true
+encoding_rs.workspace = true
+
+# Archive support
+zip.workspace = true
+sevenz-rust.workspace = true
+tar.workspace = true
+flate2.workspace = true
+
+# File watching
+notify = "6.1"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

@@ -1,0 +1,35 @@
+[package]
+name = "app_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+app_log = { path = "../app_log" }
+app_fs = { path = "../app_fs" }
+app_db = { path = "../app_db" }
+ipc_proto = { path = "../ipc_proto" }
+
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+crossbeam-channel.workspace = true
+directories.workspace = true
+once_cell.workspace = true
+chrono.workspace = true
+
+# Image processing
+image.workspace = true
+xxhash-rust.workspace = true
+
+# i18n
+fluent.workspace = true
+fluent-langneg.workspace = true
+unic-langid.workspace = true

@@ -1,0 +1,40 @@
+[package]
+name = "lightning_filer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lightning_filer"
+path = "src/main.rs"
+
+[dependencies]
+app_log = { path = "../app_log" }
+app_core = { path = "../app_core" }
+app_fs = { path = "../app_fs" }
+app_db = { path = "../app_db" }
+app_ui = { path = "../app_ui" }
+ipc_proto = { path = "../ipc_proto" }
+
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+
+# GUI
+winit.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+
+# Utils
+futures.workspace = true
+pollster = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[build-dependencies]
+# For Windows icon embedding
+# winres = "0.1"

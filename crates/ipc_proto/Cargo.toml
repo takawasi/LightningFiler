@@ -1,0 +1,12 @@
+[package]
+name = "ipc_proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true
+uuid.workspace = true
+thiserror.workspace = true

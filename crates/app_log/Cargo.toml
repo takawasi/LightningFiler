@@ -1,0 +1,18 @@
+[package]
+name = "app_log"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+backtrace.workspace = true
+chrono.workspace = true
+directories.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
