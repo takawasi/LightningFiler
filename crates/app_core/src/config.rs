@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub general: GeneralConfig,
     pub viewer: ViewerConfig,
     pub filer: FilerConfig,
+    pub navigation: NavigationConfig,
     pub keybindings: HashMap<String, Vec<String>>,
     pub recent_folders: Vec<String>,
 }
@@ -22,8 +23,34 @@ impl Default for AppConfig {
             general: GeneralConfig::default(),
             viewer: ViewerConfig::default(),
             filer: FilerConfig::default(),
+            navigation: NavigationConfig::default(),
             keybindings: default_keybindings(),
             recent_folders: Vec::new(),
+        }
+    }
+}
+
+/// Navigation configuration (Doc 3 compliant)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NavigationConfig {
+    /// Threshold for nav.enter: <=threshold files -> Viewer mode, >threshold -> Browser mode
+    pub enter_threshold: Option<i32>,
+    /// Skip empty folders when navigating siblings
+    pub skip_empty_folders: bool,
+    /// Enable cross-folder navigation (auto-advance to next/prev folder)
+    pub cross_folder_navigation: bool,
+    /// Wrap around at folder boundaries
+    pub wrap_navigation: bool,
+}
+
+impl Default for NavigationConfig {
+    fn default() -> Self {
+        Self {
+            enter_threshold: Some(5), // Default: <=5 files -> Viewer mode
+            skip_empty_folders: true,
+            cross_folder_navigation: false,
+            wrap_navigation: false,
         }
     }
 }
@@ -216,37 +243,89 @@ impl AppConfig {
 fn default_keybindings() -> HashMap<String, Vec<String>> {
     let mut kb = HashMap::new();
 
-    // Navigation
-    kb.insert("nav.next_item".into(), vec!["Right".into(), "l".into(), "Space".into()]);
-    kb.insert("nav.prev_item".into(), vec!["Left".into(), "h".into(), "Shift+Space".into()]);
-    kb.insert("nav.first_item".into(), vec!["Home".into()]);
-    kb.insert("nav.last_item".into(), vec!["End".into()]);
-    kb.insert("nav.up_folder".into(), vec!["Backspace".into(), "u".into()]);
-    kb.insert("nav.enter_folder".into(), vec!["Return".into(), "o".into()]);
-    kb.insert("nav.skip_forward".into(), vec!["Ctrl+Right".into()]);
-    kb.insert("nav.skip_backward".into(), vec!["Ctrl+Left".into()]);
+    // ========================================
+    // Navigation (nav.*)
+    // ========================================
 
-    // View
-    kb.insert("view.toggle_fullscreen".into(), vec!["F11".into(), "f".into()]);
-    kb.insert("view.zoom_in".into(), vec!["Plus".into(), "Ctrl+Up".into()]);
+    // Grid/cursor movement
+    kb.insert("nav.move_up".into(), vec!["Up".into(), "k".into()]);
+    kb.insert("nav.move_down".into(), vec!["Down".into(), "j".into()]);
+    kb.insert("nav.move_left".into(), vec!["Left".into(), "h".into()]);
+    kb.insert("nav.move_right".into(), vec!["Right".into(), "l".into()]);
+    kb.insert("nav.page_up".into(), vec!["PageUp".into()]);
+    kb.insert("nav.page_down".into(), vec!["PageDown".into(), "Space".into()]);
+    kb.insert("nav.home".into(), vec!["Home".into()]);
+    kb.insert("nav.end".into(), vec!["End".into()]);
+
+    // Item navigation (Viewer context)
+    kb.insert("nav.next_item".into(), vec!["Right".into(), "l".into()]);
+    kb.insert("nav.prev_item".into(), vec!["Left".into(), "h".into()]);
+
+    // Hierarchy navigation
+    kb.insert("nav.enter".into(), vec!["Return".into(), "o".into()]);
+    kb.insert("nav.parent".into(), vec!["Backspace".into(), "u".into()]);
+    kb.insert("nav.next_sibling".into(), vec!["Ctrl+Right".into(), "Ctrl+l".into()]);
+    kb.insert("nav.prev_sibling".into(), vec!["Ctrl+Left".into(), "Ctrl+h".into()]);
+    kb.insert("nav.root".into(), vec!["Ctrl+Home".into()]);
+
+    // ========================================
+    // View (view.*)
+    // ========================================
+
+    // Zoom
+    kb.insert("view.zoom_in".into(), vec!["Plus".into(), "=".into(), "Ctrl+Up".into()]);
     kb.insert("view.zoom_out".into(), vec!["Minus".into(), "Ctrl+Down".into()]);
-    kb.insert("view.zoom_reset".into(), vec!["0".into()]);
-    kb.insert("view.fit_to_window".into(), vec!["Ctrl+0".into()]);
-    kb.insert("view.original_size".into(), vec!["1".into()]);
-    kb.insert("view.rotate_left".into(), vec!["Ctrl+Left".into()]);
-    kb.insert("view.rotate_right".into(), vec!["Ctrl+Right".into()]);
+    kb.insert("view.zoom_set".into(), vec!["0".into(), "Ctrl+0".into()]);
 
-    // File
+    // Display
+    kb.insert("view.toggle_fullscreen".into(), vec!["F11".into(), "f".into()]);
+    kb.insert("view.rotate".into(), vec!["r".into()]);
+    kb.insert("view.spread_mode".into(), vec!["s".into()]);
+    kb.insert("view.set_background".into(), vec!["b".into()]);
+    kb.insert("view.toggle_info".into(), vec!["i".into()]);
+
+    // Smart scroll
+    kb.insert("view.smart_scroll_down".into(), vec!["Space".into()]);
+    kb.insert("view.smart_scroll_up".into(), vec!["Shift+Space".into()]);
+
+    // Slideshow
+    kb.insert("view.slideshow".into(), vec!["F5".into()]);
+
+    // ========================================
+    // File (file.*)
+    // ========================================
+
     kb.insert("file.delete".into(), vec!["Delete".into()]);
     kb.insert("file.rename".into(), vec!["F2".into()]);
     kb.insert("file.copy".into(), vec!["Ctrl+c".into()]);
     kb.insert("file.cut".into(), vec!["Ctrl+x".into()]);
     kb.insert("file.paste".into(), vec!["Ctrl+v".into()]);
+    kb.insert("file.copy_path".into(), vec!["Ctrl+Shift+c".into()]);
+    kb.insert("file.open_explorer".into(), vec!["Ctrl+e".into()]);
 
-    // App
+    // ========================================
+    // Metadata (meta.*)
+    // ========================================
+
+    // Rating with numpad
+    kb.insert("meta.rate:0".into(), vec!["Numpad0".into()]);
+    kb.insert("meta.rate:1".into(), vec!["Numpad1".into()]);
+    kb.insert("meta.rate:2".into(), vec!["Numpad2".into()]);
+    kb.insert("meta.rate:3".into(), vec!["Numpad3".into()]);
+    kb.insert("meta.rate:4".into(), vec!["Numpad4".into()]);
+    kb.insert("meta.rate:5".into(), vec!["Numpad5".into()]);
+    kb.insert("meta.toggle_mark".into(), vec!["m".into()]);
+    kb.insert("meta.copy_meta".into(), vec!["`".into()]);
+
+    // ========================================
+    // App (app.*)
+    // ========================================
+
     kb.insert("app.open_settings".into(), vec!["Ctrl+Comma".into()]);
-    kb.insert("app.quit".into(), vec!["Alt+F4".into(), "q".into()]);
-    kb.insert("app.search".into(), vec!["Ctrl+f".into(), "Slash".into()]);
+    kb.insert("app.exit".into(), vec!["Alt+F4".into(), "q".into()]);
+    kb.insert("app.search".into(), vec!["Ctrl+f".into(), "/".into()]);
+    kb.insert("app.toggle_panel:tree".into(), vec!["F3".into()]);
+    kb.insert("app.toggle_panel:info".into(), vec!["F4".into()]);
 
     kb
 }

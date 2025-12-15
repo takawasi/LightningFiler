@@ -19,7 +19,7 @@ pub use encoding::{detect_encoding, decode_bytes, EncodingHint};
 pub use vfs::{VirtualFileSystem, VfsEntry, VfsError};
 pub use watcher::{FileWatcher, WatchEvent};
 pub use sanitize::{sanitize_filename, SanitizeMode};
-pub use browser::{FileEntry, ListOptions, SortBy, SortOrder, list_directory, list_drives, get_parent, is_root};
+pub use browser::{FileEntry, ListOptions, SortBy, SortOrder, list_directory, list_drives, get_parent, is_root, get_siblings, get_next_sibling, get_prev_sibling, count_files};
 
 use thiserror::Error;
 

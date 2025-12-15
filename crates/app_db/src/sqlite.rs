@@ -298,4 +298,86 @@ impl MetadataDb {
 
         Ok(files)
     }
+
+    // ===== Rating Operations =====
+
+    /// Set rating for a file (0-5)
+    pub fn set_rating(&self, path_hash: u64, rating: i32) -> Result<()> {
+        let conn = self.pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
+
+        // Get current metadata JSON and update rating
+        let current_metadata: Option<String> = conn.query_row(
+            "SELECT metadata FROM files WHERE path_hash = ?1",
+            [path_hash as i64],
+            |row| row.get(0),
+        ).ok().flatten();
+
+        let new_metadata = match current_metadata {
+            Some(json_str) => {
+                if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                    json["rating"] = serde_json::json!(rating);
+                    serde_json::to_string(&json).unwrap_or_else(|_| format!(r#"{{"rating":{}}}"#, rating))
+                } else {
+                    format!(r#"{{"rating":{}}}"#, rating)
+                }
+            }
+            None => format!(r#"{{"rating":{}}}"#, rating),
+        };
+
+        conn.execute(
+            "UPDATE files SET metadata = ?1 WHERE path_hash = ?2",
+            rusqlite::params![new_metadata, path_hash as i64],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get rating for a file (returns 0 if not set)
+    pub fn get_rating(&self, path_hash: u64) -> Result<i32> {
+        let conn = self.pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
+
+        let metadata: Option<String> = conn.query_row(
+            "SELECT metadata FROM files WHERE path_hash = ?1",
+            [path_hash as i64],
+            |row| row.get(0),
+        ).ok().flatten();
+
+        let rating = metadata
+            .and_then(|json_str| serde_json::from_str::<serde_json::Value>(&json_str).ok())
+            .and_then(|json| json["rating"].as_i64())
+            .map(|r| r as i32)
+            .unwrap_or(0);
+
+        Ok(rating)
+    }
+
+    /// Set label color for a file
+    pub fn set_label(&self, path_hash: u64, label: Option<u32>) -> Result<()> {
+        let conn = self.pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
+
+        let current_metadata: Option<String> = conn.query_row(
+            "SELECT metadata FROM files WHERE path_hash = ?1",
+            [path_hash as i64],
+            |row| row.get(0),
+        ).ok().flatten();
+
+        let new_metadata = match current_metadata {
+            Some(json_str) => {
+                if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                    json["label"] = serde_json::json!(label);
+                    serde_json::to_string(&json).unwrap_or_else(|_| format!(r#"{{"label":{:?}}}"#, label))
+                } else {
+                    format!(r#"{{"label":{:?}}}"#, label)
+                }
+            }
+            None => format!(r#"{{"label":{:?}}}"#, label),
+        };
+
+        conn.execute(
+            "UPDATE files SET metadata = ?1 WHERE path_hash = ?2",
+            rusqlite::params![new_metadata, path_hash as i64],
+        )?;
+
+        Ok(())
+    }
 }

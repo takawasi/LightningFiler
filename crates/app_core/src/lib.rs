@@ -20,9 +20,15 @@ pub mod image_loader;
 
 pub use state::AppState;
 pub use config::AppConfig;
-pub use command::{Command, CommandId, CommandDispatcher};
+pub use command::{
+    Command, CommandId, CommandDispatcher, CommandParams, CommandHandler,
+    // Enums
+    CenterMode, ZoomMode, Direction, ScrollUnit, Position, SyncMode,
+    SlideshowAction, SlideshowOrder, FlipAxis, SpreadMode, BackgroundColor,
+    InfoLevel, TransitionMode, PathFormat, LabelColor, CopyTarget,
+};
 pub use error::AppError;
-pub use navigation::{NavigationContext, NavigationState};
+pub use navigation::{NavigationContext, NavigationState, GridLayout, SelectionState, FileEntry as NavFileEntry};
 pub use resource::ResourceManager;
 pub use image_loader::{ImageLoader, LoadedImage, ThumbnailGenerator, is_supported_image, get_image_dimensions};
 

@@ -9,6 +9,11 @@ rust-version.workspace = true
 name = "lightning_filer"
 path = "src/main.rs"
 
+[features]
+default = []
+clipboard = ["dep:arboard"]
+trash = ["dep:trash"]
+
 [dependencies]
 app_log = { path = "../app_log" }
 app_core = { path = "../app_core" }
@@ -34,6 +39,11 @@ futures.workspace = true
 pollster = "0.3"
 dirs-next = "2.0"
 image.workspace = true
+open = "5.0"
+
+# Optional features
+arboard = { version = "3", optional = true }
+trash = { version = "3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

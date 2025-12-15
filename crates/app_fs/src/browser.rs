@@ -319,6 +319,96 @@ pub fn list_drives() -> Vec<UniversalPath> {
     vec![UniversalPath::new("/")]
 }
 
+/// Get sibling folders of a given folder
+/// Returns (previous_sibling, next_sibling)
+pub fn get_siblings<P: AsRef<Path>>(path: P, skip_empty: bool) -> (Option<UniversalPath>, Option<UniversalPath>) {
+    let path = path.as_ref();
+
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return (None, None),
+    };
+
+    let current_name = match path.file_name() {
+        Some(n) => n.to_string_lossy().to_string(),
+        None => return (None, None),
+    };
+
+    // List sibling directories
+    let options = ListOptions {
+        show_hidden: false,
+        show_directories: true,
+        show_files: false,
+        sort_by: SortBy::Name,
+        sort_order: SortOrder::Ascending,
+        filter_extensions: None,
+    };
+
+    let siblings = match list_directory(parent, &options) {
+        Ok(entries) => entries,
+        Err(_) => return (None, None),
+    };
+
+    // Filter directories only and optionally skip empty ones
+    let siblings: Vec<_> = siblings
+        .into_iter()
+        .filter(|e| {
+            if !e.is_dir {
+                return false;
+            }
+            if skip_empty {
+                // Check if directory has any files/subdirs
+                list_directory(e.path.as_path(), &ListOptions::default())
+                    .map(|entries| !entries.is_empty())
+                    .unwrap_or(false)
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    // Find current folder index
+    let current_idx = siblings.iter().position(|e| e.name == current_name);
+
+    let prev = current_idx.and_then(|idx| {
+        if idx > 0 {
+            siblings.get(idx - 1).map(|e| e.path.clone())
+        } else {
+            None
+        }
+    });
+
+    let next = current_idx.and_then(|idx| {
+        siblings.get(idx + 1).map(|e| e.path.clone())
+    });
+
+    (prev, next)
+}
+
+/// Get the next sibling folder (nav.next_sibling)
+pub fn get_next_sibling<P: AsRef<Path>>(path: P, skip_empty: bool) -> Option<UniversalPath> {
+    get_siblings(path, skip_empty).1
+}
+
+/// Get the previous sibling folder (nav.prev_sibling)
+pub fn get_prev_sibling<P: AsRef<Path>>(path: P, skip_empty: bool) -> Option<UniversalPath> {
+    get_siblings(path, skip_empty).0
+}
+
+/// Count files in a directory (for nav.enter threshold check)
+pub fn count_files<P: AsRef<Path>>(path: P) -> Result<usize> {
+    let options = ListOptions {
+        show_hidden: false,
+        show_directories: false,
+        show_files: true,
+        sort_by: SortBy::Name,
+        sort_order: SortOrder::Ascending,
+        filter_extensions: None,
+    };
+
+    list_directory(path, &options).map(|entries| entries.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
