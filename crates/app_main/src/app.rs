@@ -381,6 +381,10 @@ impl App {
         let selected_index = self.selected_index;
         let entries = self.file_entries.clone();
 
+        // Track UI actions from egui closure
+        let mut clicked_index: Option<usize> = None;
+        let mut double_clicked_index: Option<usize> = None;
+
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             // Top panel - Toolbar
             egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -412,8 +416,12 @@ impl App {
                             let icon = if entry.is_dir { "📁 " } else { "📄 " };
                             let label = format!("{}{}", icon, entry.name);
 
-                            if ui.selectable_label(is_selected, label).clicked() {
-                                // Selection handled via events
+                            let response = ui.selectable_label(is_selected, label);
+                            if response.clicked() {
+                                clicked_index = Some(idx);
+                            }
+                            if response.double_clicked() {
+                                double_clicked_index = Some(idx);
                             }
                         }
                     });
@@ -425,6 +433,13 @@ impl App {
                 }
             });
         });
+
+        // Handle UI actions after egui run
+        if let Some(idx) = double_clicked_index {
+            self.on_open(idx);
+        } else if let Some(idx) = clicked_index {
+            self.on_select(idx);
+        }
 
         // Handle platform output
         if let Some(egui_state) = &mut self.egui_state {
