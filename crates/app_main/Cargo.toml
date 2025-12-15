@@ -24,6 +24,7 @@ parking_lot.workspace = true
 
 # GUI
 winit.workspace = true
+wgpu.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
@@ -31,6 +32,8 @@ egui-winit.workspace = true
 # Utils
 futures.workspace = true
 pollster = "0.3"
+dirs-next = "2.0"
+image.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

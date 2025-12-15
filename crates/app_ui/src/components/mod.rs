@@ -5,7 +5,7 @@ pub mod viewer;
 pub mod toolbar;
 pub mod status_bar;
 
-pub use file_browser::FileBrowser;
+pub use file_browser::{FileBrowser, FileItem, BrowserAction, BrowserViewMode};
 pub use viewer::ImageViewer;
-pub use toolbar::Toolbar;
-pub use status_bar::StatusBar;
+pub use toolbar::{Toolbar, ToolbarAction};
+pub use status_bar::{StatusBar, StatusInfo};

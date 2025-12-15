@@ -22,12 +22,14 @@ parking_lot.workspace = true
 dashmap.workspace = true
 crossbeam-channel.workspace = true
 directories.workspace = true
+dirs-next = "2.0"
 once_cell.workspace = true
 chrono.workspace = true
 
 # Image processing
 image.workspace = true
 xxhash-rust.workspace = true
+rayon.workspace = true
 
 # i18n
 fluent.workspace = true

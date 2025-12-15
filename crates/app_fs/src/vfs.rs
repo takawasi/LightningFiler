@@ -141,13 +141,15 @@ impl VirtualFileSystem {
                 .map_err(|e| FsError::Archive(e.to_string()))?;
 
             // Handle filename encoding
-            let name = if file.is_utf8() {
-                file.name().to_string()
-            } else {
-                // Try to decode non-UTF8 filename
-                let raw_name = file.name_raw();
-                let (decoded, _) = encoding::decode_bytes(raw_name, hint);
-                decoded
+            // Try to decode as UTF-8 first, fallback to system encoding
+            let raw_name = file.name_raw();
+            let name = match std::str::from_utf8(raw_name) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    // Try to decode non-UTF8 filename
+                    let (decoded, _) = encoding::decode_bytes(raw_name, hint);
+                    decoded
+                }
             };
 
             entries.push(VfsEntry {
@@ -205,7 +207,7 @@ impl VirtualFileSystem {
                     name: entry.name().rsplit('/').next().unwrap_or(entry.name()).to_string(),
                     path: entry.name().to_string(),
                     size: entry.size(),
-                    compressed_size: Some(entry.compressed_size()),
+                    compressed_size: Some(entry.compressed_size),
                     is_dir: entry.is_directory(),
                     modified: None, // 7z-rust doesn't expose timestamps easily
                 });

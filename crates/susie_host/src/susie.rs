@@ -40,22 +40,27 @@ impl SusiePlugin {
     pub unsafe fn load(path: &Path) -> anyhow::Result<Self> {
         let library = Library::new(path)?;
 
-        // Required functions
+        // Required functions - extract raw function pointers first
         let get_plugin_info: Symbol<GetPluginInfo> = library.get(b"GetPluginInfo\0")?;
+        let get_plugin_info_fn = *get_plugin_info;
+        drop(get_plugin_info);
+
         let is_supported: Symbol<IsSupported> = library.get(b"IsSupported\0")?;
+        let is_supported_fn = *is_supported;
+        drop(is_supported);
 
         // Optional functions (image plugins have GetPicture, archive plugins have GetArchiveInfo/GetFile)
-        let get_picture: Option<Symbol<GetPicture>> = library.get(b"GetPicture\0").ok();
-        let get_archive_info: Option<Symbol<GetArchiveInfo>> = library.get(b"GetArchiveInfo\0").ok();
-        let get_file: Option<Symbol<GetFile>> = library.get(b"GetFile\0").ok();
+        let get_picture_fn = library.get::<GetPicture>(b"GetPicture\0").ok().map(|s| *s);
+        let get_archive_info_fn = library.get::<GetArchiveInfo>(b"GetArchiveInfo\0").ok().map(|s| *s);
+        let get_file_fn = library.get::<GetFile>(b"GetFile\0").ok().map(|s| *s);
 
         Ok(Self {
             _library: library,
-            get_plugin_info: *get_plugin_info,
-            is_supported: *is_supported,
-            get_picture: get_picture.map(|s| *s),
-            get_archive_info: get_archive_info.map(|s| *s),
-            get_file: get_file.map(|s| *s),
+            get_plugin_info: get_plugin_info_fn,
+            is_supported: is_supported_fn,
+            get_picture: get_picture_fn,
+            get_archive_info: get_archive_info_fn,
+            get_file: get_file_fn,
         })
     }
 

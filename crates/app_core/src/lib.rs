@@ -7,6 +7,7 @@
 //! - Error types
 //! - Navigation context
 //! - Resource management
+//! - Image loading
 
 pub mod state;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod error;
 pub mod navigation;
 pub mod resource;
 pub mod i18n;
+pub mod image_loader;
 
 pub use state::AppState;
 pub use config::AppConfig;
@@ -22,6 +24,7 @@ pub use command::{Command, CommandId, CommandDispatcher};
 pub use error::AppError;
 pub use navigation::{NavigationContext, NavigationState};
 pub use resource::ResourceManager;
+pub use image_loader::{ImageLoader, LoadedImage, ThumbnailGenerator, is_supported_image, get_image_dimensions};
 
 use once_cell::sync::OnceCell;
 

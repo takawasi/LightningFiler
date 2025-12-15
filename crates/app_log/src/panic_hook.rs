@@ -2,7 +2,7 @@
 
 use backtrace::Backtrace;
 use chrono::Local;
-use std::panic::PanicInfo;
+use std::panic::PanicHookInfo;
 
 /// Initialize the panic hook for crash reporting
 pub fn init_panic_hook() {
@@ -10,7 +10,7 @@ pub fn init_panic_hook() {
     tracing::debug!("Panic hook initialized");
 }
 
-fn panic_handler(info: &PanicInfo) {
+fn panic_handler(info: &PanicHookInfo) {
     let backtrace = Backtrace::new();
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
@@ -54,7 +54,7 @@ fn panic_handler(info: &PanicInfo) {
 }
 
 #[cfg(windows)]
-fn show_error_dialog(dump_path: &std::path::Path, info: &PanicInfo) {
+fn show_error_dialog(dump_path: &std::path::Path, info: &PanicHookInfo) {
     use windows::core::HSTRING;
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 

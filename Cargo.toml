@@ -23,7 +23,7 @@ winit = "0.30"
 egui = "0.29"
 egui-wgpu = "0.29"
 egui-winit = "0.29"
-wgpu = "23.0"
+wgpu = "22.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 cosmic-text = "0.12"
 
@@ -76,7 +76,7 @@ toml = "0.8"
 directories = "5.0"
 
 # Scripting (Phase 3)
-mlua = { version = "0.9", features = ["luajit", "serialize"], optional = true }
+mlua = { version = "0.9", features = ["luajit", "serialize"] }
 
 # Native plugin support
 libloading = "0.8"

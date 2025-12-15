@@ -1,7 +1,8 @@
 //! Application state management
 
-use crate::{AppConfig, AppError, CommandDispatcher, NavigationState, ResourceManager};
+use crate::{AppConfig, AppError, CommandDispatcher, NavigationState, ResourceManager, ImageLoader};
 use app_db::{DbPool, MetadataDb, ThumbnailCache};
+use app_fs::UniversalPath;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -22,11 +23,17 @@ pub struct AppState {
     /// Resource manager (textures, bitmaps)
     pub resources: Arc<ResourceManager>,
 
+    /// Image loader
+    pub image_loader: ImageLoader,
+
     /// Navigation state
     pub navigation: RwLock<NavigationState>,
 
     /// Command dispatcher
     pub commands: RwLock<CommandDispatcher>,
+
+    /// Current directory path
+    pub current_path: RwLock<UniversalPath>,
 
     /// Is the application in fullscreen mode?
     pub is_fullscreen: RwLock<bool>,
@@ -54,19 +61,38 @@ impl AppState {
         // Initialize resource manager
         let resources = Arc::new(ResourceManager::new());
 
+        // Initialize image loader
+        let image_loader = ImageLoader::new();
+
+        // Default to user's home directory or current directory
+        let start_path = dirs_next::home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
         Ok(Self {
             config: RwLock::new(config),
             db_pool,
             metadata_db,
             thumbnail_cache,
             resources,
+            image_loader,
             navigation: RwLock::new(NavigationState::new()),
             commands: RwLock::new(CommandDispatcher::new()),
+            current_path: RwLock::new(UniversalPath::new(start_path)),
             is_fullscreen: RwLock::new(false),
             zoom: RwLock::new(1.0),
             pan: RwLock::new((0.0, 0.0)),
             rotation: RwLock::new(0),
         })
+    }
+
+    /// Get current directory path
+    pub fn current_path(&self) -> UniversalPath {
+        self.current_path.read().clone()
+    }
+
+    /// Set current directory
+    pub fn set_current_path(&self, path: UniversalPath) {
+        *self.current_path.write() = path;
     }
 
     /// Save the current configuration

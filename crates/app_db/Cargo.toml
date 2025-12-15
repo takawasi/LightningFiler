@@ -20,7 +20,7 @@ directories.workspace = true
 rusqlite.workspace = true
 rocksdb.workspace = true
 r2d2 = "0.8"
-r2d2_sqlite = "0.24"
+r2d2_sqlite = "0.25"
 
 # Utils
 xxhash-rust.workspace = true

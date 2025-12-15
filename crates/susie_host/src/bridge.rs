@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use ipc_proto::{BridgeCommand, BridgeResponse, ErrorCode};
-use std::io::{Read, Write};
 
 #[cfg(windows)]
 use std::os::windows::io::FromRawHandle;
