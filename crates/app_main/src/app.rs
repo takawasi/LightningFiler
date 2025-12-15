@@ -1,8 +1,8 @@
 //! Application main loop
 
 use anyhow::Result;
-use app_core::{state, AppConfig, is_supported_image};
-use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, list_drives, get_parent, is_root};
+use app_core::{state, is_supported_image};
+use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root};
 use app_ui::{
     components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction},
     InputHandler, Renderer, Theme,
@@ -429,6 +429,7 @@ impl App {
         output.present();
     }
 
+    #[allow(dead_code)]
     fn ui(&mut self, ctx: &egui::Context) {
         // Top panel - Toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -499,6 +500,7 @@ impl App {
         });
     }
 
+    #[allow(dead_code)]
     fn handle_toolbar_action(&mut self, action: ToolbarAction) {
         match action {
             ToolbarAction::Previous => self.prev_image(),
