@@ -1,7 +1,7 @@
 //! Image viewer component
 //! Based on Doc 4: UI/Rendering Specification
 
-use egui::{Ui, Vec2, Rect, Pos2, TextureId, Color32, Stroke, FontId, Align2};
+use egui::{Ui, Vec2, Rect, Pos2, TextureId, Color32, FontId, Align2};
 use std::time::Instant;
 
 /// Viewer action returned to parent

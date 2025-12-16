@@ -274,49 +274,100 @@ impl App {
         // Add system fonts that support Japanese
         #[cfg(windows)]
         {
-            // Windows: Use Yu Gothic or Meiryo
-            if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\YuGothR.ttc") {
-                fonts.font_data.insert(
-                    "japanese".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
-            } else if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\meiryo.ttc") {
-                fonts.font_data.insert(
-                    "japanese".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
+            // Windows: Try multiple Japanese fonts in order of preference
+            let font_paths = [
+                // Yu Gothic (Windows 10+)
+                "C:\\Windows\\Fonts\\YuGothR.ttc",
+                "C:\\Windows\\Fonts\\YuGothM.ttc",
+                "C:\\Windows\\Fonts\\yugothic.ttf",
+                // Meiryo (Windows Vista+)
+                "C:\\Windows\\Fonts\\meiryo.ttc",
+                "C:\\Windows\\Fonts\\meiryob.ttc",
+                // MS Gothic (legacy)
+                "C:\\Windows\\Fonts\\msgothic.ttc",
+                // Noto Sans CJK (if installed)
+                "C:\\Windows\\Fonts\\NotoSansCJK-Regular.ttc",
+                "C:\\Windows\\Fonts\\NotoSansJP-Regular.otf",
+            ];
+
+            let mut font_loaded = false;
+            for path in font_paths {
+                if let Ok(font_data) = std::fs::read(path) {
+                    tracing::info!("Loaded Japanese font from: {}", path);
+                    let mut font_arc: std::sync::Arc<egui::FontData> = egui::FontData::from_owned(font_data).into();
+                    // For TTC files, try to specify font index 0
+                    if path.ends_with(".ttc") {
+                        if let Some(fd) = std::sync::Arc::get_mut(&mut font_arc) {
+                            fd.tweak.y_offset_factor = 0.0; // Ensure no vertical offset
+                        }
+                    }
+                    fonts.font_data.insert("japanese".to_owned(), font_arc);
+                    font_loaded = true;
+                    break;
+                }
+            }
+
+            if !font_loaded {
+                tracing::warn!("No Japanese font found on Windows");
             }
         }
 
         #[cfg(not(windows))]
         {
-            // Linux: Try common Japanese fonts
+            // Linux/macOS: Try common Japanese fonts
             let font_paths = [
+                // Noto Sans CJK (most common on Linux)
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
                 "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/OTF/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+                // Noto Sans JP
+                "/usr/share/fonts/opentype/noto/NotoSansJP-Regular.otf",
+                "/usr/share/fonts/noto/NotoSansJP-Regular.otf",
+                // IPAex Gothic
+                "/usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf",
+                "/usr/share/fonts/ipa-gothic/ipag.ttf",
+                // VL Gothic
+                "/usr/share/fonts/truetype/vlgothic/VL-Gothic-Regular.ttf",
+                // Takao Gothic
+                "/usr/share/fonts/truetype/takao-gothic/TakaoGothic.ttf",
+                // fonts-japanese-gothic (Debian/Ubuntu)
                 "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+                // macOS
+                "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+                "/System/Library/Fonts/Hiragino Sans GB.ttc",
             ];
+
+            let mut font_loaded = false;
             for path in font_paths {
                 if let Ok(font_data) = std::fs::read(path) {
+                    tracing::info!("Loaded Japanese font from: {}", path);
                     fonts.font_data.insert(
                         "japanese".to_owned(),
                         egui::FontData::from_owned(font_data).into(),
                     );
+                    font_loaded = true;
                     break;
                 }
             }
+
+            if !font_loaded {
+                tracing::warn!("No Japanese font found on this system");
+            }
         }
 
-        // Add Japanese font to font families
+        // Add Japanese font to font families (insert at beginning for priority)
         if fonts.font_data.contains_key("japanese") {
             fonts.families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
-                .push("japanese".to_owned());
+                .insert(0, "japanese".to_owned());
             fonts.families
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
-                .push("japanese".to_owned());
+                .insert(0, "japanese".to_owned());
+            tracing::info!("Japanese font added to font families");
         }
 
         self.egui_ctx.set_fonts(fonts);
@@ -838,6 +889,8 @@ impl App {
                 } else {
                     // Image viewer mode - Doc 4 compliant
                     let available = ui.available_rect_before_wrap();
+                    let seek_bar_height = 24.0;
+                    let top_bar_height = 36.0;
 
                     // Draw dark background
                     ui.painter().rect_filled(
@@ -846,8 +899,54 @@ impl App {
                         egui::Color32::from_rgb(32, 32, 32),
                     );
 
-                    // Allocate rect for input handling
-                    let response = ui.allocate_rect(available, egui::Sense::click_and_drag());
+                    // === SEEK BAR (always visible, allocated FIRST to capture clicks) ===
+                    let seek_bar = egui::Rect::from_min_size(
+                        egui::Pos2::new(available.left(), available.bottom() - seek_bar_height),
+                        egui::Vec2::new(available.width(), seek_bar_height),
+                    );
+                    let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180);
+                    ui.painter().rect_filled(seek_bar, 0.0, overlay_bg);
+
+                    // Draw seek bar track
+                    let track_margin = 20.0;
+                    let track_rect = egui::Rect::from_min_max(
+                        egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
+                        egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
+                    );
+                    ui.painter().rect_filled(track_rect, 2.0, egui::Color32::DARK_GRAY);
+
+                    // Draw position indicator
+                    if image_count > 0 {
+                        let progress = current_image_pos as f32 / image_count as f32;
+                        let indicator_x = track_rect.left() + track_rect.width() * progress;
+                        let indicator_pos = egui::Pos2::new(indicator_x, seek_bar.center().y);
+                        ui.painter().circle_filled(indicator_pos, 6.0, egui::Color32::WHITE);
+
+                        // Filled portion
+                        let filled_rect = egui::Rect::from_min_max(
+                            track_rect.left_top(),
+                            egui::Pos2::new(indicator_x, track_rect.bottom()),
+                        );
+                        ui.painter().rect_filled(filled_rect, 2.0, egui::Color32::from_rgb(100, 150, 255));
+                    }
+
+                    // Allocate seek bar for click (BEFORE image area)
+                    let seek_response = ui.allocate_rect(seek_bar, egui::Sense::click_and_drag());
+                    if seek_response.clicked() || seek_response.dragged() {
+                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                            let relative_x = (pos.x - track_rect.left()) / track_rect.width();
+                            seek_bar_clicked = Some(relative_x.clamp(0.0, 1.0));
+                        }
+                    }
+
+                    // === IMAGE AREA (excludes seek bar) ===
+                    let image_area = egui::Rect::from_min_max(
+                        available.min,
+                        egui::Pos2::new(available.max.x, available.max.y - seek_bar_height),
+                    );
+
+                    // Allocate image area for pan/zoom (AFTER seek bar)
+                    let response = ui.allocate_rect(image_area, egui::Sense::click_and_drag());
 
                     // Handle zoom with scroll wheel (Doc 4: cursor-centered zoom)
                     if response.hovered() {
@@ -868,9 +967,14 @@ impl App {
                         viewer_drag_ended = true;
                     }
 
-                    // Double-click to reset view
+                    // Double-click to CLOSE viewer (return to browser)
                     if response.double_clicked() {
                         viewer_double_clicked = true;
+                    }
+
+                    // Check mouse activity for overlay visibility
+                    if ui.input(|i| i.pointer.delta().length() > 0.0) {
+                        mouse_moved = true;
                     }
 
                     // Render image if texture exists
@@ -995,46 +1099,7 @@ impl App {
                                 egui::FontId::proportional(14.0),
                                 egui::Color32::WHITE,
                             );
-
-                            // === Bottom Seek Bar ===
-                            let seek_bar_height = 24.0;
-                            let seek_bar = egui::Rect::from_min_size(
-                                egui::Pos2::new(available.left(), available.bottom() - seek_bar_height),
-                                egui::Vec2::new(available.width(), seek_bar_height),
-                            );
-                            ui.painter().rect_filled(seek_bar, 0.0, overlay_bg);
-
-                            // Draw seek bar track
-                            let track_margin = 20.0;
-                            let track_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
-                                egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
-                            );
-                            ui.painter().rect_filled(track_rect, 2.0, egui::Color32::DARK_GRAY);
-
-                            // Draw position indicator
-                            if image_count > 0 {
-                                let progress = current_image_pos as f32 / image_count as f32;
-                                let indicator_x = track_rect.left() + track_rect.width() * progress;
-                                let indicator_pos = egui::Pos2::new(indicator_x, seek_bar.center().y);
-                                ui.painter().circle_filled(indicator_pos, 6.0, egui::Color32::WHITE);
-
-                                // Filled portion
-                                let filled_rect = egui::Rect::from_min_max(
-                                    track_rect.left_top(),
-                                    egui::Pos2::new(indicator_x, track_rect.bottom()),
-                                );
-                                ui.painter().rect_filled(filled_rect, 2.0, egui::Color32::from_rgb(100, 150, 255));
-                            }
-
-                            // Handle seek bar click
-                            let seek_response = ui.allocate_rect(seek_bar, egui::Sense::click());
-                            if seek_response.clicked() {
-                                if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                                    let relative_x = (pos.x - track_rect.left()) / track_rect.width();
-                                    seek_bar_clicked = Some(relative_x.clamp(0.0, 1.0));
-                                }
-                            }
+                            // Note: Seek bar is now drawn before image area (always visible)
                         }
                     } else {
                         // No image placeholder
@@ -1184,9 +1249,9 @@ impl App {
                 self.image_viewer.pan += viewer_pan_delta;
             }
 
-            // Double-click to reset view
+            // Double-click to CLOSE viewer (return to browser)
             if viewer_double_clicked {
-                self.image_viewer.reset_view();
+                self.show_browser = true;
             }
 
             // Update overlay visibility based on mouse movement
