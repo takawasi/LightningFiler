@@ -175,6 +175,78 @@ impl Dialog for RenameDialog {
     fn close(&mut self) { self.open = false; }
 }
 
+/// New folder dialog
+pub struct NewFolderDialog {
+    pub open: bool,
+    pub folder_name: String,
+}
+
+impl NewFolderDialog {
+    pub fn new() -> Self {
+        Self {
+            open: true,
+            folder_name: String::new(),
+        }
+    }
+}
+
+impl Default for NewFolderDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Dialog for NewFolderDialog {
+    type Output = String;
+
+    fn ui(&mut self, ctx: &Context) -> DialogResult<String> {
+        if !self.open {
+            return DialogResult::None;
+        }
+
+        let mut result = DialogResult::None;
+
+        Window::new("新規フォルダ")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("フォルダ名:");
+                    let response = ui.text_edit_singleline(&mut self.folder_name);
+
+                    // Enter で確定
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if !self.folder_name.is_empty() {
+                            result = DialogResult::Ok(self.folder_name.clone());
+                            self.open = false;
+                        }
+                    }
+                });
+
+                ui.add_space(16.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("作成").clicked() {
+                        if !self.folder_name.is_empty() {
+                            result = DialogResult::Ok(self.folder_name.clone());
+                            self.open = false;
+                        }
+                    }
+                    if ui.button("キャンセル").clicked() {
+                        result = DialogResult::Cancel;
+                        self.open = false;
+                    }
+                });
+            });
+
+        result
+    }
+
+    fn is_open(&self) -> bool { self.open }
+    fn close(&mut self) { self.open = false; }
+}
+
 /// Tag edit dialog
 pub struct TagEditDialog {
     pub open: bool,

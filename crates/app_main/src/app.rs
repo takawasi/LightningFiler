@@ -6,7 +6,7 @@ use app_core::{state, is_supported_image, Command, CommandId, NavigationState, T
 use app_db::{MetadataDb, ThumbnailCache, DbPool};
 use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root, get_next_sibling, get_prev_sibling, count_files, FileOperations, DefaultFileOperations, ClipboardMode, VirtualFileSystem, FileWatcher, FsEvent};
 use app_ui::{
-    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, ToolbarState, SortMode, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow, FolderTree, FolderTreeAction, ThumbnailCatalog, ThumbnailItem, CatalogAction, NavigateDirection},
+    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, ToolbarState, SortMode, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, NewFolderDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow, FolderTree, FolderTreeAction, ThumbnailCatalog, ThumbnailItem, CatalogAction, NavigateDirection},
     InputHandler, Renderer, Theme,
 };
 use egui_wgpu::ScreenDescriptor;
@@ -83,6 +83,7 @@ struct App {
     // Dialogs
     confirm_dialog: Option<ConfirmDialog>,
     rename_dialog: Option<RenameDialog>,
+    new_folder_dialog: Option<NewFolderDialog>,
     tag_dialog: Option<TagEditDialog>,
     pending_delete_path: Option<PathBuf>,
 
@@ -215,6 +216,7 @@ impl App {
 
             confirm_dialog: None,
             rename_dialog: None,
+            new_folder_dialog: None,
             tag_dialog: None,
             pending_delete_path: None,
 
@@ -961,6 +963,7 @@ impl App {
         // Track dialog results for post-closure handling
         let mut confirm_result: Option<bool> = None;
         let mut rename_result: Option<String> = None;
+        let mut new_folder_result: Option<String> = None;
         let mut tag_result: Option<Vec<String>> = None;
 
         // Track viewer input for post-closure handling
@@ -1346,6 +1349,20 @@ impl App {
                 }
             }
 
+            // New folder dialog
+            if let Some(ref mut dialog) = self.new_folder_dialog {
+                match dialog.ui(ctx) {
+                    DialogResult::Ok(folder_name) => {
+                        new_folder_result = Some(folder_name);
+                        self.new_folder_dialog = None;
+                    }
+                    DialogResult::Cancel => {
+                        self.new_folder_dialog = None;
+                    }
+                    _ => {}
+                }
+            }
+
             // Tag edit dialog
             if let Some(ref mut dialog) = self.tag_dialog {
                 match dialog.ui(ctx) {
@@ -1446,6 +1463,21 @@ impl App {
                 if let Some(_entry) = self.file_entries.get(idx) {
                     // TODO: Save tags to DB
                     self.status.message = format!("Tags updated: {:?}", tags);
+                }
+            }
+        }
+
+        // Handle new folder creation
+        if let Some(folder_name) = new_folder_result {
+            let new_folder_path = self.current_path.as_path().join(&folder_name);
+            match std::fs::create_dir(&new_folder_path) {
+                Ok(_) => {
+                    self.status.message = format!("Created folder: {}", folder_name);
+                    // Refresh to show the new folder
+                    self.navigate_to(self.current_path.clone());
+                }
+                Err(e) => {
+                    self.status.message = format!("Failed to create folder: {}", e);
                 }
             }
         }
@@ -1852,8 +1884,7 @@ impl App {
 
             // File operations
             ToolbarAction::NewFolder => {
-                // TODO: Show new folder dialog
-                tracing::info!("New folder requested");
+                self.new_folder_dialog = Some(NewFolderDialog::new());
             }
             ToolbarAction::Copy => {
                 if let Some(idx) = self.selected_index {

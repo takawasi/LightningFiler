@@ -18,7 +18,7 @@ pub use viewer::{ImageViewer, ViewerAction, FitMode};
 pub use toolbar::{Toolbar, ToolbarAction, ToolbarState, SortMode};
 pub use status_bar::{StatusBar, StatusInfo};
 pub use settings::{SettingsDialog, SettingsTab, SettingsAction};
-pub use dialogs::{Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog};
+pub use dialogs::{Dialog, DialogResult, ConfirmDialog, RenameDialog, NewFolderDialog, TagEditDialog};
 pub use spread_viewer::{SpreadViewer, SpreadMode, SpreadLayout, PagePosition};
 pub use split_view::{SplitView, SplitDirection, SplitPane, SplitViewResponse};
 pub use effects::{ImageTransform, Rotation, ViewerBackground, BackgroundColor, PageTransition, TransitionType};
