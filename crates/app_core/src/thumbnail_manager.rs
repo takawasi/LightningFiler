@@ -183,11 +183,11 @@ impl ThumbnailManager {
     }
 
     /// Get thumbnail synchronously if cached, otherwise return None
-    /// Uses path-based hash for fast lookup (doesn't read file content)
+    /// Uses UniversalPath.id() for consistent hash lookup
     pub fn get_cached_sync(&self, path: &Path, size: ThumbnailSize) -> Option<LoadedImage> {
-        // Use path-based hash for fast lookup (no file I/O)
-        let path_str = path.to_string_lossy();
-        let path_hash = xxh3_64(path_str.as_bytes());
+        // Create UniversalPath to get consistent hash (same as app.rs uses)
+        let upath = UniversalPath::new(path);
+        let path_hash = upath.id();
         let (width, height) = size.to_dimensions();
         let cache_key = CacheKey::new(path_hash, width, height);
 
@@ -195,7 +195,7 @@ impl ThumbnailManager {
         let cached_data = self.cache.get(cache_key).ok()??;
 
         Some(LoadedImage {
-            path: UniversalPath::new(path),
+            path: upath,
             width,
             height,
             data: cached_data,
@@ -205,10 +205,10 @@ impl ThumbnailManager {
     }
 
     /// Check if a thumbnail exists in cache
-    /// Uses path-based hash for fast lookup (doesn't read file content)
+    /// Uses UniversalPath.id() for consistent hash lookup
     pub fn has_cached(&self, path: &Path, size: ThumbnailSize) -> Result<bool, AppError> {
-        let path_str = path.to_string_lossy();
-        let path_hash = xxh3_64(path_str.as_bytes());
+        let upath = UniversalPath::new(path);
+        let path_hash = upath.id();
         let (width, height) = size.to_dimensions();
         let cache_key = CacheKey::new(path_hash, width, height);
 
