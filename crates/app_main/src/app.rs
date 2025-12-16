@@ -1343,7 +1343,9 @@ impl App {
     fn update_catalog_items(&mut self) {
         // Rebuild catalog if entries changed
         if self.catalog_items.len() != self.file_entries.len() {
-            self.catalog_items = self.file_entries.iter().map(|e| {
+            // Clone entries to avoid borrow conflict
+            let entries: Vec<_> = self.file_entries.iter().cloned().collect();
+            self.catalog_items = entries.iter().map(|e| {
                 let mut item = ThumbnailItem::new(
                     e.path.as_path().to_path_buf(),
                     e.is_dir,
@@ -1361,14 +1363,19 @@ impl App {
             }).collect();
         } else {
             // Update thumbnails for existing items that don't have one yet
-            for (idx, entry) in self.file_entries.iter().enumerate() {
-                if entry.is_image() {
+            // Collect indices and entries to update first to avoid borrow conflict
+            let updates: Vec<_> = self.file_entries.iter().enumerate()
+                .filter(|(idx, entry)| {
+                    entry.is_image() &&
+                    self.catalog_items.get(*idx).map(|i| i.texture.is_none()).unwrap_or(false)
+                })
+                .map(|(idx, entry)| (idx, entry.clone()))
+                .collect();
+
+            for (idx, entry) in updates {
+                if let Some(texture) = self.load_thumbnail_texture(&entry) {
                     if let Some(item) = self.catalog_items.get_mut(idx) {
-                        if item.texture.is_none() {
-                            if let Some(texture) = self.load_thumbnail_texture(entry) {
-                                item.set_texture(texture);
-                            }
-                        }
+                        item.set_texture(texture);
                     }
                 }
             }
