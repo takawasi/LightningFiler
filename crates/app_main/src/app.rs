@@ -255,6 +255,9 @@ impl App {
         // Apply theme
         self.theme.apply(&self.egui_ctx);
 
+        // Setup Japanese font support
+        self.setup_fonts();
+
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.egui_state = Some(egui_state);
@@ -262,6 +265,61 @@ impl App {
         self.input_handler = Some(input_handler);
 
         Ok(())
+    }
+
+    /// Setup fonts for Japanese and Unicode support
+    fn setup_fonts(&self) {
+        let mut fonts = egui::FontDefinitions::default();
+
+        // Add system fonts that support Japanese
+        #[cfg(windows)]
+        {
+            // Windows: Use Yu Gothic or Meiryo
+            if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\YuGothR.ttc") {
+                fonts.font_data.insert(
+                    "japanese".to_owned(),
+                    egui::FontData::from_owned(font_data).into(),
+                );
+            } else if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\meiryo.ttc") {
+                fonts.font_data.insert(
+                    "japanese".to_owned(),
+                    egui::FontData::from_owned(font_data).into(),
+                );
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            // Linux: Try common Japanese fonts
+            let font_paths = [
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+            ];
+            for path in font_paths {
+                if let Ok(font_data) = std::fs::read(path) {
+                    fonts.font_data.insert(
+                        "japanese".to_owned(),
+                        egui::FontData::from_owned(font_data).into(),
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Add Japanese font to font families
+        if fonts.font_data.contains_key("japanese") {
+            fonts.families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("japanese".to_owned());
+            fonts.families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("japanese".to_owned());
+        }
+
+        self.egui_ctx.set_fonts(fonts);
     }
 
     /// Navigate to a directory

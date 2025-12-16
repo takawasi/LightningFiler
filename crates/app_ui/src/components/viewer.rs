@@ -180,20 +180,28 @@ impl ImageViewer {
             );
         }
 
-        // Draw overlay UI (Doc 4 spec) - MUST process before handle_input to get seek bar clicks
+        // Always draw seek bar at bottom (even when overlay is hidden)
+        if self.texture.is_some() {
+            if let Some(seek_action) = self.draw_seek_bar(ui, available) {
+                action = seek_action;
+            }
+        }
+
+        // Draw overlay UI (Doc 4 spec) - top bar only when visible
         if self.overlay_visible && self.texture.is_some() {
-            if let Some(overlay_action) = self.draw_overlay(ui, available) {
+            if let Some(overlay_action) = self.draw_top_bar(ui, available) {
                 action = overlay_action;
             }
         }
 
         // Handle input for main image area (excluding overlay areas)
-        // Only if no overlay action was taken
+        // Only if no overlay/seek action was taken
         if matches!(action, ViewerAction::None) {
-            let image_area = if self.overlay_visible && self.texture.is_some() {
-                // Exclude top bar and seek bar from input area
+            // Always exclude seek bar, exclude top bar only when visible
+            let image_area = if self.texture.is_some() {
+                let top_offset = if self.overlay_visible { bar_height } else { 0.0 };
                 Rect::from_min_max(
-                    Pos2::new(available.min.x, available.min.y + bar_height),
+                    Pos2::new(available.min.x, available.min.y + top_offset),
                     Pos2::new(available.max.x, available.max.y - seek_height),
                 )
             } else {
@@ -215,14 +223,12 @@ impl ImageViewer {
         Rect::from_min_max(Pos2::new(u_min, v_min), Pos2::new(u_max, v_max))
     }
 
-    /// Draw Doc 4 overlay UI
-    fn draw_overlay(&mut self, ui: &mut Ui, rect: Rect) -> Option<ViewerAction> {
+    /// Draw top control bar (Doc 4: 1.3 A)
+    fn draw_top_bar(&mut self, ui: &mut Ui, rect: Rect) -> Option<ViewerAction> {
         let mut action: Option<ViewerAction> = None;
         let bar_height = 40.0;
-        let seek_height = 24.0;
         let bg_color = Color32::from_rgba_unmultiplied(0, 0, 0, 180);
 
-        // === Top Control Bar (Doc 4: 1.3 A) ===
         let top_bar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), bar_height));
         ui.painter().rect_filled(top_bar, 0.0, bg_color);
 
@@ -315,7 +321,15 @@ impl ImageViewer {
             }
         }
 
-        // === Bottom Seek Bar (Doc 4: 1.3 B) ===
+        action
+    }
+
+    /// Draw bottom seek bar (Doc 4: 1.3 B) - Always visible
+    fn draw_seek_bar(&mut self, ui: &mut Ui, rect: Rect) -> Option<ViewerAction> {
+        let mut action: Option<ViewerAction> = None;
+        let seek_height = 24.0;
+        let bg_color = Color32::from_rgba_unmultiplied(0, 0, 0, 180);
+
         let seek_bar = Rect::from_min_size(
             Pos2::new(rect.min.x, rect.max.y - seek_height),
             Vec2::new(rect.width(), seek_height),
@@ -347,7 +361,7 @@ impl ImageViewer {
             );
             ui.painter().rect_filled(filled_rect, 2.0, Color32::from_rgb(100, 150, 255));
 
-            // Seek interaction
+            // Seek interaction - allocate clickable area
             let seek_response = ui.allocate_rect(track_rect.expand(8.0), egui::Sense::click_and_drag());
             if seek_response.drag_started() {
                 self.seek_dragging = true;
