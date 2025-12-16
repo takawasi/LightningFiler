@@ -294,14 +294,10 @@ impl App {
             for path in font_paths {
                 if let Ok(font_data) = std::fs::read(path) {
                     tracing::info!("Loaded Japanese font from: {}", path);
-                    let mut font_arc: std::sync::Arc<egui::FontData> = egui::FontData::from_owned(font_data).into();
-                    // For TTC files, try to specify font index 0
-                    if path.ends_with(".ttc") {
-                        if let Some(fd) = std::sync::Arc::get_mut(&mut font_arc) {
-                            fd.tweak.y_offset_factor = 0.0; // Ensure no vertical offset
-                        }
-                    }
-                    fonts.font_data.insert("japanese".to_owned(), font_arc);
+                    fonts.font_data.insert(
+                        "japanese".to_owned(),
+                        egui::FontData::from_owned(font_data),
+                    );
                     font_loaded = true;
                     break;
                 }
