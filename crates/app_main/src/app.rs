@@ -6,7 +6,7 @@ use app_core::{state, is_supported_image, Command, CommandId, NavigationState, T
 use app_db::{MetadataDb, ThumbnailCache, DbPool};
 use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root, get_next_sibling, get_prev_sibling, count_files, FileOperations, DefaultFileOperations, ClipboardMode, VirtualFileSystem, FileWatcher, FsEvent};
 use app_ui::{
-    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow, FolderTree, FolderTreeAction, ThumbnailCatalog, ThumbnailItem, CatalogAction},
+    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, ToolbarState, SortMode, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow, FolderTree, FolderTreeAction, ThumbnailCatalog, ThumbnailItem, CatalogAction},
     InputHandler, Renderer, Theme,
 };
 use egui_wgpu::ScreenDescriptor;
@@ -102,6 +102,13 @@ struct App {
     folder_tree: FolderTree,
     thumbnail_catalog: ThumbnailCatalog,
     catalog_items: Vec<ThumbnailItem>,
+
+    // Navigation history
+    history_back: Vec<UniversalPath>,
+    history_forward: Vec<UniversalPath>,
+
+    // Toolbar state
+    toolbar_state: ToolbarState,
 }
 
 impl App {
@@ -217,6 +224,10 @@ impl App {
             folder_tree: FolderTree::new(),
             thumbnail_catalog: ThumbnailCatalog::new(),
             catalog_items: Vec::new(),
+
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            toolbar_state: ToolbarState::new(),
         }
     }
 
@@ -265,6 +276,19 @@ impl App {
         self.input_handler = Some(input_handler);
 
         Ok(())
+    }
+
+    /// Toggle fullscreen mode
+    fn toggle_fullscreen(&self) {
+        if let Some(ref window) = self.window {
+            use winit::window::Fullscreen;
+            if window.fullscreen().is_some() {
+                window.set_fullscreen(None);
+            } else {
+                // Use borderless fullscreen on primary monitor
+                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            }
+        }
     }
 
     /// Setup fonts for Japanese and Unicode support
@@ -369,8 +393,19 @@ impl App {
         self.egui_ctx.set_fonts(fonts);
     }
 
-    /// Navigate to a directory
+    /// Navigate to a directory (with history tracking)
     fn navigate_to(&mut self, path: UniversalPath) {
+        self.navigate_to_internal(path, true);
+    }
+
+    /// Navigate to a directory (internal, with optional history recording)
+    fn navigate_to_internal(&mut self, path: UniversalPath, record_history: bool) {
+        // Record current path to history before navigating
+        if record_history && self.current_path.as_path() != path.as_path() {
+            self.history_back.push(self.current_path.clone());
+            self.history_forward.clear(); // Clear forward history on new navigation
+        }
+
         // Unwatch previous path
         if let Some(ref mut watcher) = self.file_watcher {
             let _ = watcher.unwatch(self.current_path.as_path());
@@ -385,6 +420,7 @@ impl App {
             Ok(entries) => {
                 self.current_path = path.clone();
                 self.file_entries = entries;
+                self.apply_sort(); // Apply current sort mode
                 self.selected_index = None;
                 self.status.file_name = path.to_string();
                 self.status.message = format!("{} items", self.file_entries.len());
@@ -407,6 +443,43 @@ impl App {
                 self.status.message = format!("Error: {}", e);
             }
         }
+    }
+
+    /// Navigate back in history
+    fn navigate_back(&mut self) {
+        if let Some(prev_path) = self.history_back.pop() {
+            self.history_forward.push(self.current_path.clone());
+            self.navigate_to_internal(prev_path, false);
+        }
+    }
+
+    /// Navigate forward in history
+    fn navigate_forward(&mut self) {
+        if let Some(next_path) = self.history_forward.pop() {
+            self.history_back.push(self.current_path.clone());
+            self.navigate_to_internal(next_path, false);
+        }
+    }
+
+    /// Apply current sort mode to file entries
+    fn apply_sort(&mut self) {
+        use SortMode::*;
+        self.file_entries.sort_by(|a, b| {
+            // Directories always first
+            if a.is_dir != b.is_dir {
+                return if a.is_dir { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+            }
+            match self.toolbar_state.sort_mode {
+                Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                NameDesc => b.name.to_lowercase().cmp(&a.name.to_lowercase()),
+                Size => a.size.cmp(&b.size),
+                SizeDesc => b.size.cmp(&a.size),
+                Modified => a.modified.cmp(&b.modified),
+                ModifiedDesc => b.modified.cmp(&a.modified),
+                Type => a.extension.cmp(&b.extension),
+                TypeDesc => b.extension.cmp(&a.extension),
+            }
+        });
     }
 
     /// Enter an archive file and display its contents as if it were a directory
@@ -854,27 +927,37 @@ impl App {
         let mut seek_bar_clicked: Option<f32> = None;
         let mut nav_action: Option<&str> = None;
 
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            // Top panel - Toolbar
-            egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("📁");
-                    ui.label(&current_path_str);
-                });
-            });
+        // Toolbar state for egui closure
+        let can_go_back = !self.history_back.is_empty();
+        let can_go_forward = !self.history_forward.is_empty();
+        let mut toolbar_state = std::mem::take(&mut self.toolbar_state);
+        toolbar_state.set_path(&current_path_str);
+        let mut toolbar_action: Option<ToolbarAction> = None;
 
-            // Bottom panel - Status bar
-            egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} items", entries.len()));
-                    if let Some(idx) = selected_index {
-                        ui.separator();
-                        if let Some(entry) = entries.get(idx) {
-                            ui.label(&entry.name);
-                        }
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            // Top panel - Toolbar (only in browser mode)
+            if show_browser {
+                egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+                    if let Some(action) = Toolbar::ui(ui, &mut toolbar_state, can_go_back, can_go_forward) {
+                        toolbar_action = Some(action);
                     }
                 });
-            });
+            }
+
+            // Bottom panel - Status bar (browser mode only)
+            if show_browser {
+                egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} items", entries.len()));
+                        if let Some(idx) = selected_index {
+                            ui.separator();
+                            if let Some(entry) = entries.get(idx) {
+                                ui.label(&entry.name);
+                            }
+                        }
+                    });
+                });
+            }
 
             // Central panel - File browser or viewer
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -897,8 +980,8 @@ impl App {
                 } else {
                     // Image viewer mode - Doc 4 compliant
                     let available = ui.available_rect_before_wrap();
-                    let seek_bar_height = 24.0;
-                    let top_bar_height = 36.0;
+                    let seek_bar_height = 32.0;
+                    let _top_bar_height = 36.0;
 
                     // Draw dark background
                     ui.painter().rect_filled(
@@ -907,51 +990,93 @@ impl App {
                         egui::Color32::from_rgb(32, 32, 32),
                     );
 
-                    // === SEEK BAR (always visible, allocated FIRST to capture clicks) ===
+                    // Define seek bar rect for hover detection
                     let seek_bar = egui::Rect::from_min_size(
                         egui::Pos2::new(available.left(), available.bottom() - seek_bar_height),
                         egui::Vec2::new(available.width(), seek_bar_height),
                     );
-                    let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180);
-                    ui.painter().rect_filled(seek_bar, 0.0, overlay_bg);
 
-                    // Draw seek bar track
-                    let track_margin = 20.0;
-                    let track_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
-                        egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
+                    // Check if mouse is near seek bar area (with larger detection zone)
+                    let hover_zone = egui::Rect::from_min_size(
+                        egui::Pos2::new(available.left(), available.bottom() - seek_bar_height - 20.0),
+                        egui::Vec2::new(available.width(), seek_bar_height + 20.0),
                     );
-                    ui.painter().rect_filled(track_rect, 2.0, egui::Color32::DARK_GRAY);
+                    let seek_bar_hovered = ui.input(|i| {
+                        i.pointer.hover_pos()
+                            .map(|pos| hover_zone.contains(pos))
+                            .unwrap_or(false)
+                    });
 
-                    // Draw position indicator
-                    if image_count > 0 {
-                        let progress = current_image_pos as f32 / image_count as f32;
-                        let indicator_x = track_rect.left() + track_rect.width() * progress;
-                        let indicator_pos = egui::Pos2::new(indicator_x, seek_bar.center().y);
-                        ui.painter().circle_filled(indicator_pos, 6.0, egui::Color32::WHITE);
+                    // Calculate seek bar opacity: hover = full, overlay_visible = half, hidden = 0
+                    let seek_bar_opacity = if seek_bar_hovered {
+                        220 // Nearly opaque when hovered
+                    } else if overlay_visible {
+                        100 // Semi-transparent when visible
+                    } else {
+                        0 // Hidden
+                    };
 
-                        // Filled portion
-                        let filled_rect = egui::Rect::from_min_max(
-                            track_rect.left_top(),
-                            egui::Pos2::new(indicator_x, track_rect.bottom()),
+                    // Only render seek bar if visible
+                    if seek_bar_opacity > 0 {
+                        let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, seek_bar_opacity);
+                        ui.painter().rect_filled(seek_bar, 4.0, overlay_bg);
+
+                        // Draw seek bar track
+                        let track_margin = 40.0;
+                        let track_rect = egui::Rect::from_min_max(
+                            egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
+                            egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
                         );
-                        ui.painter().rect_filled(filled_rect, 2.0, egui::Color32::from_rgb(100, 150, 255));
+                        let track_color = egui::Color32::from_rgba_unmultiplied(80, 80, 80, seek_bar_opacity);
+                        ui.painter().rect_filled(track_rect, 2.0, track_color);
+
+                        // Draw position indicator and counter
+                        if image_count > 0 {
+                            let progress = current_image_pos as f32 / image_count as f32;
+                            let indicator_x = track_rect.left() + track_rect.width() * progress;
+
+                            // Filled portion
+                            let filled_rect = egui::Rect::from_min_max(
+                                track_rect.left_top(),
+                                egui::Pos2::new(indicator_x, track_rect.bottom()),
+                            );
+                            let fill_color = egui::Color32::from_rgba_unmultiplied(100, 150, 255, seek_bar_opacity);
+                            ui.painter().rect_filled(filled_rect, 2.0, fill_color);
+
+                            // Position indicator
+                            let indicator_pos = egui::Pos2::new(indicator_x, seek_bar.center().y);
+                            let indicator_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, seek_bar_opacity);
+                            ui.painter().circle_filled(indicator_pos, 8.0, indicator_color);
+
+                            // Item counter at right side
+                            let counter_text = format!("{} / {}", current_image_pos, image_count);
+                            let text_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, seek_bar_opacity);
+                            ui.painter().text(
+                                egui::Pos2::new(seek_bar.right() - 10.0, seek_bar.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                counter_text,
+                                egui::FontId::proportional(14.0),
+                                text_color,
+                            );
+                        }
                     }
 
-                    // Allocate seek bar for click (BEFORE image area)
+                    // Allocate seek bar for click (always - for interaction even when nearly invisible)
                     let seek_response = ui.allocate_rect(seek_bar, egui::Sense::click_and_drag());
                     if seek_response.clicked() || seek_response.dragged() {
+                        let track_margin = 40.0;
+                        let track_rect = egui::Rect::from_min_max(
+                            egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
+                            egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
+                        );
                         if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                             let relative_x = (pos.x - track_rect.left()) / track_rect.width();
                             seek_bar_clicked = Some(relative_x.clamp(0.0, 1.0));
                         }
                     }
 
-                    // === IMAGE AREA (excludes seek bar) ===
-                    let image_area = egui::Rect::from_min_max(
-                        available.min,
-                        egui::Pos2::new(available.max.x, available.max.y - seek_bar_height),
-                    );
+                    // === IMAGE AREA (full screen - seek bar overlays) ===
+                    let image_area = available;
 
                     // Allocate image area for pan/zoom (AFTER seek bar)
                     let response = ui.allocate_rect(image_area, egui::Sense::click_and_drag());
@@ -1198,6 +1323,14 @@ impl App {
             }
         });
 
+        // Restore toolbar state
+        self.toolbar_state = toolbar_state;
+
+        // Handle toolbar actions
+        if let Some(action) = toolbar_action {
+            self.handle_toolbar_action(action);
+        }
+
         // Handle UI actions after egui run
         if let Some(idx) = double_clicked_index {
             self.on_open(idx);
@@ -1380,8 +1513,10 @@ impl App {
     #[allow(dead_code)]
     fn ui(&mut self, ctx: &egui::Context) {
         // Top panel - Toolbar
+        let can_go_back = !self.history_back.is_empty();
+        let can_go_forward = !self.history_forward.is_empty();
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            if let Some(action) = Toolbar::ui(ui) {
+            if let Some(action) = Toolbar::ui(ui, &mut self.toolbar_state, can_go_back, can_go_forward) {
                 self.handle_toolbar_action(action);
             }
         });
@@ -1554,9 +1689,58 @@ impl App {
     #[allow(dead_code)]
     fn handle_toolbar_action(&mut self, action: ToolbarAction) {
         match action {
+            // New navigation actions with history
+            ToolbarAction::Back => self.navigate_back(),
+            ToolbarAction::Forward => self.navigate_forward(),
+            ToolbarAction::UpFolder => self.navigate_up(),
+            ToolbarAction::Refresh => {
+                let path = self.current_path.clone();
+                self.navigate_to(path);
+            }
+            ToolbarAction::NavigateTo(path_str) => {
+                let path = PathBuf::from(&path_str);
+                if path.exists() {
+                    self.navigate_to(UniversalPath::new(path));
+                }
+            }
+
+            // File operations
+            ToolbarAction::NewFolder => {
+                // TODO: Show new folder dialog
+                tracing::info!("New folder requested");
+            }
+            ToolbarAction::Copy => {
+                if let Some(idx) = self.selected_index {
+                    if let Some(entry) = self.file_entries.get(idx) {
+                        let path_buf = entry.path.as_path().to_path_buf();
+                        let _ = self.file_ops.copy_to_clipboard(&[path_buf], ClipboardMode::Copy);
+                    }
+                }
+            }
+            ToolbarAction::Delete => {
+                if let Some(idx) = self.selected_index {
+                    if let Some(entry) = self.file_entries.get(idx) {
+                        self.pending_delete_path = Some(entry.path.as_path().to_path_buf());
+                        self.confirm_dialog = Some(ConfirmDialog::new_delete(&entry.name, true));
+                    }
+                }
+            }
+
+            // Sort
+            ToolbarAction::Sort(mode) => {
+                self.toolbar_state.sort_mode = mode;
+                self.apply_sort();
+            }
+
+            // Settings
+            ToolbarAction::Settings => {
+                let config = state().map(|s| s.config.read().clone()).unwrap_or_default();
+                self.settings_dialog.open(config, None);
+            }
+
+            // Legacy actions (kept for compatibility)
             ToolbarAction::Previous => self.prev_image(),
             ToolbarAction::Next => self.next_image(),
-            ToolbarAction::UpFolder => self.navigate_up(),
             ToolbarAction::Home => {
                 if let Some(home) = dirs_next::home_dir() {
                     self.navigate_to(UniversalPath::new(home));
@@ -1576,9 +1760,6 @@ impl App {
             }
             ToolbarAction::ListView => {
                 self.file_browser.view_mode = BrowserViewMode::List;
-            }
-            ToolbarAction::Settings => {
-                // TODO: Open settings
             }
             ToolbarAction::Fullscreen => {
                 self.show_browser = !self.show_browser;
@@ -1789,7 +1970,7 @@ impl App {
                 true
             }
             CommandId::VIEW_TOGGLE_FULLSCREEN => {
-                self.show_browser = !self.show_browser;
+                self.toggle_fullscreen();
                 true
             }
             CommandId::VIEW_NEXT_ITEM => {
