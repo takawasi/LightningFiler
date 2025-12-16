@@ -6,7 +6,7 @@ use app_core::{state, is_supported_image, Command, CommandId, NavigationState, T
 use app_db::{MetadataDb, ThumbnailCache, DbPool};
 use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root, get_next_sibling, get_prev_sibling, count_files, FileOperations, DefaultFileOperations, ClipboardMode, VirtualFileSystem, FileWatcher, FsEvent};
 use app_ui::{
-    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow},
+    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow, FolderTree, FolderTreeAction, ThumbnailCatalog, ThumbnailItem, CatalogAction},
     InputHandler, Renderer, Theme,
 };
 use egui_wgpu::ScreenDescriptor;
@@ -97,6 +97,11 @@ struct App {
 
     // Slideshow
     slideshow: Slideshow,
+
+    // New UI components (Doc spec compliance)
+    folder_tree: FolderTree,
+    thumbnail_catalog: ThumbnailCatalog,
+    catalog_items: Vec<ThumbnailItem>,
 }
 
 impl App {
@@ -209,6 +214,9 @@ impl App {
             viewer_background: ViewerBackground::new(),
             page_transition: PageTransition::new(),
             slideshow: Slideshow::new(),
+            folder_tree: FolderTree::new(),
+            thumbnail_catalog: ThumbnailCatalog::new(),
+            catalog_items: Vec::new(),
         }
     }
 
@@ -441,6 +449,14 @@ impl App {
                 self.navigate_to(parent);
             }
         }
+    }
+
+    /// Navigate to a path (PathBuf version)
+    fn navigate_to_path(&mut self, path: &std::path::Path) {
+        let universal_path = UniversalPath::new(path);
+        self.navigate_to(universal_path);
+        // Clear catalog items to force refresh
+        self.catalog_items.clear();
     }
 
     /// Load and display an image
@@ -1248,70 +1264,112 @@ impl App {
         // Main content
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.show_browser {
-                // Split view: browser + preview
-                egui::SidePanel::left("browser_panel")
+                // Doc spec: Left panel = Folder tree only, Right panel = Thumbnail catalog
+
+                // Left panel - Folder Tree (folders only, no files)
+                egui::SidePanel::left("folder_tree_panel")
                     .resizable(true)
-                    .default_width(350.0)
-                    .min_width(200.0)
+                    .default_width(200.0)
+                    .min_width(150.0)
+                    .max_width(400.0)
                     .show_inside(ui, |ui| {
-                        // Path bar
-                        ui.horizontal(|ui| {
-                            if ui.button("⬆").on_hover_text("Up").clicked() {
-                                self.navigate_up();
-                            }
-                            ui.label(self.current_path.to_string());
-                        });
+                        ui.heading("Folders");
                         ui.separator();
 
-                        // File list
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            // Clone entries to avoid borrow conflicts
-                            let entries = self.file_entries.clone();
-
-                            let items: Vec<app_ui::components::file_browser::FileItem> =
-                                entries.iter().map(|e| {
-                                    // Load thumbnail for image files
-                                    let thumbnail = if e.is_image() {
-                                        self.load_thumbnail_texture(e)
-                                    } else {
-                                        None
-                                    };
-
-                                    app_ui::components::file_browser::FileItem {
-                                        name: e.name.clone(),
-                                        path: e.path.display().to_string(),
-                                        is_dir: e.is_dir,
-                                        size: e.size,
-                                        modified: e.modified,
-                                        extension: e.extension.clone(),
-                                        thumbnail,
-                                    }
-                                }).collect();
-
-                            // Sync selection
-                            self.file_browser.selected = self.selected_index;
-
-                            if let Some(action) = self.file_browser.ui(ui, &items) {
-                                match action {
-                                    BrowserAction::Select(idx) => self.on_select(idx),
-                                    BrowserAction::Open(idx) => self.on_open(idx),
-                                    BrowserAction::ContextMenu(_) => {}
+                        // Folder tree - only shows folders
+                        let current = self.current_path.as_path().to_path_buf();
+                        if let Some(action) = self.folder_tree.ui(ui, &current) {
+                            match action {
+                                FolderTreeAction::SelectFolder(path) => {
+                                    self.navigate_to_path(&path);
+                                }
+                                FolderTreeAction::ToggleExpand(_) => {
+                                    // Tree handles this internally
+                                }
+                                FolderTreeAction::GoToParent => {
+                                    self.navigate_up();
                                 }
                             }
-                        });
+                        }
                     });
 
-                // Preview area
+                // Right panel - Thumbnail Catalog (image thumbnails in grid)
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let action = self.image_viewer.ui(ui);
-                    self.handle_viewer_action(action);
+                    // Path bar at top
+                    ui.horizontal(|ui| {
+                        if ui.button("⬆").on_hover_text("Parent folder").clicked() {
+                            self.navigate_up();
+                        }
+                        ui.separator();
+                        ui.label(format!("📁 {}", self.current_path));
+                        ui.separator();
+                        let image_count = self.file_entries.iter().filter(|e| e.is_image()).count();
+                        ui.label(format!("{} images", image_count));
+                    });
+                    ui.separator();
+
+                    // Update catalog items from file entries
+                    self.update_catalog_items();
+
+                    // Sync selection
+                    self.thumbnail_catalog.selected = self.selected_index;
+
+                    // Thumbnail catalog grid
+                    let catalog_items = self.catalog_items.clone();
+                    if let Some(action) = self.thumbnail_catalog.ui(ui, &catalog_items) {
+                        match action {
+                            CatalogAction::Select(idx) => self.on_select(idx),
+                            CatalogAction::Open(idx) => self.on_open(idx),
+                            CatalogAction::GoToParent => self.navigate_up(),
+                            CatalogAction::Navigate(_) => {
+                                // Navigation already handled internally
+                                if let Some(idx) = self.thumbnail_catalog.selected {
+                                    self.on_select(idx);
+                                }
+                            }
+                        }
+                    }
                 });
             } else {
-                // Full viewer mode
+                // Full viewer mode - handle double-click to close
+                let viewer_response = ui.allocate_response(
+                    ui.available_size(),
+                    egui::Sense::click(),
+                );
+
+                // Double-click to return to browser
+                if viewer_response.double_clicked() {
+                    self.show_browser = true;
+                }
+
+                // Render viewer
                 let action = self.image_viewer.ui(ui);
                 self.handle_viewer_action(action);
             }
         });
+    }
+
+    /// Update catalog items from current file entries
+    fn update_catalog_items(&mut self) {
+        // Only update if entries changed
+        if self.catalog_items.len() != self.file_entries.len() {
+            self.catalog_items = self.file_entries.iter().map(|e| {
+                let mut item = ThumbnailItem::new(
+                    e.path.as_path().to_path_buf(),
+                    e.is_dir,
+                    e.is_image(),
+                );
+
+                // Load thumbnail texture if available
+                if e.is_image() {
+                    if let Some(texture) = self.load_thumbnail_texture(e) {
+                        item.set_texture(texture);
+                    }
+                }
+
+                item
+            }).collect();
+        }
     }
 
     /// Handle viewer overlay UI actions (Doc 4 spec)
