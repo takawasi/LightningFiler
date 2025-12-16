@@ -6,7 +6,7 @@ use app_core::{state, is_supported_image, Command, CommandId, NavigationState, T
 use app_db::{MetadataDb, ThumbnailCache, DbPool};
 use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root, get_next_sibling, get_prev_sibling, count_files, FileOperations, DefaultFileOperations, ClipboardMode, VirtualFileSystem, FileWatcher, FsEvent};
 use app_ui::{
-    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, ToolbarState, SortMode, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow, FolderTree, FolderTreeAction, ThumbnailCatalog, ThumbnailItem, CatalogAction},
+    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, ToolbarState, SortMode, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow, FolderTree, FolderTreeAction, ThumbnailCatalog, ThumbnailItem, CatalogAction, NavigateDirection},
     InputHandler, Renderer, Theme,
 };
 use egui_wgpu::ScreenDescriptor;
@@ -885,6 +885,11 @@ impl App {
         // Run egui - take input before borrowing self
         let raw_input = egui_state.take_egui_input(&window);
 
+        // Update catalog items before extracting for UI
+        if self.show_browser {
+            self.update_catalog_items();
+        }
+
         // Store values we need for UI
         let current_path_str = self.current_path.display().to_string();
         let show_browser = self.show_browser;
@@ -934,6 +939,15 @@ impl App {
         toolbar_state.set_path(&current_path_str);
         let mut toolbar_action: Option<ToolbarAction> = None;
 
+        // Folder tree and thumbnail catalog for browser mode
+        let mut folder_tree = std::mem::take(&mut self.folder_tree);
+        let mut thumbnail_catalog = std::mem::take(&mut self.thumbnail_catalog);
+        let current_path_buf = self.current_path.as_path().to_path_buf();
+        let catalog_items = self.catalog_items.clone();
+        thumbnail_catalog.selected = selected_index;
+        let mut folder_action: Option<FolderTreeAction> = None;
+        let mut catalog_action: Option<CatalogAction> = None;
+
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             // Top panel - Toolbar (only in browser mode)
             if show_browser {
@@ -962,19 +976,34 @@ impl App {
             // Central panel - File browser or viewer
             egui::CentralPanel::default().show(ctx, |ui| {
                 if show_browser {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (idx, entry) in entries.iter().enumerate() {
-                            let is_selected = selected_index == Some(idx);
-                            let icon = if entry.is_dir { "📁 " } else { "📄 " };
-                            let label = format!("{}{}", icon, entry.name);
+                    // Left panel - Folder Tree (folders only)
+                    egui::SidePanel::left("folder_tree_panel")
+                        .resizable(true)
+                        .default_width(200.0)
+                        .min_width(150.0)
+                        .max_width(400.0)
+                        .show_inside(ui, |ui| {
+                            ui.heading("Folders");
+                            ui.separator();
+                            if let Some(action) = folder_tree.ui(ui, &current_path_buf) {
+                                folder_action = Some(action);
+                            }
+                        });
 
-                            let response = ui.selectable_label(is_selected, label);
-                            if response.clicked() {
-                                clicked_index = Some(idx);
-                            }
-                            if response.double_clicked() {
-                                double_clicked_index = Some(idx);
-                            }
+                    // Right panel - Thumbnail Catalog (grid)
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        // Header with path and image count
+                        ui.horizontal(|ui| {
+                            ui.label(format!("📁 {}", current_path_str));
+                            ui.separator();
+                            let img_count = entries.iter().filter(|e| e.is_image()).count();
+                            ui.label(format!("{} images", img_count));
+                        });
+                        ui.separator();
+
+                        // Thumbnail grid
+                        if let Some(action) = thumbnail_catalog.ui(ui, &catalog_items) {
+                            catalog_action = Some(action);
                         }
                     });
                 } else {
@@ -1326,12 +1355,47 @@ impl App {
         // Restore toolbar state
         self.toolbar_state = toolbar_state;
 
+        // Restore folder tree and thumbnail catalog
+        self.folder_tree = folder_tree;
+        self.thumbnail_catalog = thumbnail_catalog;
+
         // Handle toolbar actions
         if let Some(action) = toolbar_action {
             self.handle_toolbar_action(action);
         }
 
-        // Handle UI actions after egui run
+        // Handle folder tree actions
+        if let Some(action) = folder_action {
+            match action {
+                FolderTreeAction::SelectFolder(path) => {
+                    self.navigate_to_path(&path);
+                }
+                FolderTreeAction::ToggleExpand(_) => {
+                    // Tree handles this internally
+                }
+                FolderTreeAction::GoToParent => {
+                    self.navigate_up();
+                }
+            }
+        }
+
+        // Handle thumbnail catalog actions
+        if let Some(action) = catalog_action {
+            match action {
+                CatalogAction::Select(idx) => self.on_select(idx),
+                CatalogAction::Open(idx) => self.on_open(idx),
+                CatalogAction::GoToParent => self.navigate_up(),
+                CatalogAction::Navigate(dir) => {
+                    match dir {
+                        NavigateDirection::Right | NavigateDirection::Down => self.next_image(),
+                        NavigateDirection::Left | NavigateDirection::Up => self.prev_image(),
+                        _ => {} // PageUp, PageDown, Home, End handled by catalog
+                    }
+                }
+            }
+        }
+
+        // Handle UI actions after egui run (legacy - for simple list mode)
         if let Some(idx) = double_clicked_index {
             self.on_open(idx);
         } else if let Some(idx) = clicked_index {
