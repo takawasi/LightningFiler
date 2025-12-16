@@ -6,7 +6,7 @@ use app_core::{state, is_supported_image, Command, CommandId, NavigationState, T
 use app_db::{MetadataDb, ThumbnailCache, DbPool};
 use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root, get_next_sibling, get_prev_sibling, count_files, FileOperations, DefaultFileOperations, ClipboardMode, VirtualFileSystem, FileWatcher, FsEvent};
 use app_ui::{
-    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog},
+    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog, SpreadViewer, SpreadMode, SpreadLayout, SplitView, SplitDirection, ImageTransform, ViewerBackground, PageTransition, Slideshow},
     InputHandler, Renderer, Theme,
 };
 use egui_wgpu::ScreenDescriptor;
@@ -83,6 +83,20 @@ struct App {
     rename_dialog: Option<RenameDialog>,
     tag_dialog: Option<TagEditDialog>,
     pending_delete_path: Option<PathBuf>,
+
+    // Spread viewer (two-page display)
+    spread_viewer: SpreadViewer,
+
+    // Split view (compare two images)
+    split_view: SplitView,
+
+    // Viewer effects
+    image_transform: ImageTransform,
+    viewer_background: ViewerBackground,
+    page_transition: PageTransition,
+
+    // Slideshow
+    slideshow: Slideshow,
 }
 
 impl App {
@@ -188,6 +202,13 @@ impl App {
             rename_dialog: None,
             tag_dialog: None,
             pending_delete_path: None,
+
+            spread_viewer: SpreadViewer::new(),
+            split_view: SplitView::new(),
+            image_transform: ImageTransform::new(),
+            viewer_background: ViewerBackground::new(),
+            page_transition: PageTransition::new(),
+            slideshow: Slideshow::new(),
         }
     }
 
@@ -1557,10 +1578,14 @@ impl App {
             CommandId::VIEW_ROTATE => {
                 let angle = cmd.params.angle.unwrap_or(90);
                 if angle > 0 {
+                    self.image_transform.rotate_cw();
                     self.image_viewer.rotate_right();
                 } else {
+                    self.image_transform.rotate_ccw();
                     self.image_viewer.rotate_left();
                 }
+                let status = self.image_transform.status_text();
+                self.status.message = if status.is_empty() { "No transform".to_string() } else { status };
                 true
             }
             CommandId::VIEW_TOGGLE_FULLSCREEN => {
@@ -1583,38 +1608,52 @@ impl App {
                 use app_core::FlipAxis;
                 match cmd.params.axis {
                     Some(FlipAxis::Horizontal) => {
-                        // Horizontal flip - would need to be added to ImageViewer
-                        self.status.message = "Horizontal flip".to_string();
+                        self.image_transform.toggle_flip_h();
                     }
-                    Some(FlipAxis::Vertical) | None => {
-                        // Vertical flip
-                        self.status.message = "Vertical flip".to_string();
+                    Some(FlipAxis::Vertical) => {
+                        self.image_transform.toggle_flip_v();
+                    }
+                    None => {
+                        // Toggle horizontal by default
+                        self.image_transform.toggle_flip_h();
                     }
                 }
+                let status = self.image_transform.status_text();
+                self.status.message = if status.is_empty() { "No transform".to_string() } else { status };
                 true
             }
             CommandId::VIEW_SPREAD_MODE => {
-                use app_core::SpreadMode;
-                let msg = match cmd.params.spread {
-                    Some(SpreadMode::Single) => "Single page mode",
-                    Some(SpreadMode::Spread) => "Spread (2-page) mode",
-                    Some(SpreadMode::Auto) | None => "Auto spread mode",
+                use app_core::SpreadMode as CoreSpreadMode;
+                // Convert core SpreadMode to ui SpreadMode
+                match cmd.params.spread {
+                    Some(CoreSpreadMode::Single) => self.spread_viewer.mode = SpreadMode::Single,
+                    Some(CoreSpreadMode::Spread) => self.spread_viewer.mode = SpreadMode::SpreadRTL,
+                    Some(CoreSpreadMode::Auto) | None => {
+                        // Cycle through modes
+                        self.spread_viewer.cycle_mode();
+                    }
                 };
-                self.status.message = msg.to_string();
-                // TODO: Implement actual spread mode in viewer
+                // Recalculate spread for current position
+                if let Some(idx) = self.selected_index {
+                    self.spread_viewer.go_to(idx, self.file_entries.len());
+                }
+                self.status.message = format!("Spread: {}", self.spread_viewer.mode_name());
                 true
             }
             CommandId::VIEW_SET_BACKGROUND => {
-                use app_core::BackgroundColor;
-                let msg = match cmd.params.color {
-                    Some(BackgroundColor::Black) => "Background: Black",
-                    Some(BackgroundColor::Gray) => "Background: Gray",
-                    Some(BackgroundColor::White) => "Background: White",
-                    Some(BackgroundColor::Check) => "Background: Checkered",
-                    Some(BackgroundColor::Transparent) | None => "Background: Transparent",
+                use app_core::BackgroundColor as CoreBgColor;
+                use app_ui::components::BackgroundColor;
+                match cmd.params.color {
+                    Some(CoreBgColor::Black) => self.viewer_background.color = BackgroundColor::Black,
+                    Some(CoreBgColor::Gray) => self.viewer_background.color = BackgroundColor::Gray(128),
+                    Some(CoreBgColor::White) => self.viewer_background.color = BackgroundColor::White,
+                    Some(CoreBgColor::Check) => self.viewer_background.color = BackgroundColor::Checkerboard,
+                    Some(CoreBgColor::Transparent) | None => {
+                        // Cycle through backgrounds
+                        self.viewer_background.cycle();
+                    }
                 };
-                self.status.message = msg.to_string();
-                // TODO: Implement actual background color change
+                self.status.message = self.viewer_background.status_text().to_string();
                 true
             }
             CommandId::VIEW_SMART_SCROLL_DOWN => {
@@ -1656,13 +1695,15 @@ impl App {
             }
             CommandId::VIEW_SLIDESHOW => {
                 use app_core::SlideshowAction;
-                let action_str = match cmd.params.action {
-                    Some(SlideshowAction::Start) => "Slideshow started",
-                    Some(SlideshowAction::Stop) => "Slideshow stopped",
-                    Some(SlideshowAction::Toggle) | None => "Slideshow toggled",
+                let total = self.file_entries.iter().filter(|e| e.is_image()).count();
+                let current = self.selected_index.unwrap_or(0);
+                match cmd.params.action {
+                    Some(SlideshowAction::Start) => self.slideshow.start(total, current),
+                    Some(SlideshowAction::Stop) => self.slideshow.stop(),
+                    Some(SlideshowAction::Toggle) | None => self.slideshow.toggle(total, current),
                 };
-                self.status.message = action_str.to_string();
-                // TODO: Implement actual slideshow functionality
+                let status = self.slideshow.status_text();
+                self.status.message = if status.is_empty() { "Slideshow stopped".to_string() } else { status };
                 true
             }
             CommandId::VIEW_PAN => {
@@ -1785,11 +1826,26 @@ impl App {
                 true
             }
             CommandId::VIEW_SPLIT_MODE => {
-                self.status.message = "Split view mode (not yet implemented)".to_string();
+                self.split_view.toggle();
+                if self.split_view.enabled {
+                    // Set second pane to next file
+                    if let Some(idx) = self.selected_index {
+                        if idx + 1 < self.file_entries.len() {
+                            self.split_view.panes[1].path = Some(
+                                self.file_entries[idx + 1].path.as_path().to_path_buf()
+                            );
+                        }
+                    }
+                    self.status.message = format!("Split view: ON ({})", self.split_view.status_text());
+                } else {
+                    self.status.message = "Split view: OFF".to_string();
+                }
                 true
             }
             CommandId::VIEW_SYNC_SCROLL => {
-                self.status.message = "Sync scroll (not yet implemented)".to_string();
+                self.split_view.toggle_sync();
+                let sync = if self.split_view.sync_zoom { "ON" } else { "OFF" };
+                self.status.message = format!("Sync scroll: {}", sync);
                 true
             }
             CommandId::VIEW_SEEK => {
@@ -1812,8 +1868,13 @@ impl App {
             }
             CommandId::VIEW_SLIDESHOW_INTERVAL => {
                 if let Some(amount) = cmd.params.amount {
-                    self.status.message = format!("Slideshow interval: {}ms", amount);
+                    self.slideshow.set_interval_secs(amount as f32 / 1000.0);
+                } else {
+                    // Toggle increase/decrease
+                    self.slideshow.increase_interval();
                 }
+                let interval = self.slideshow.config.interval.as_secs_f32();
+                self.status.message = format!("Slideshow interval: {:.1}s", interval);
                 true
             }
 
@@ -2650,6 +2711,27 @@ impl ApplicationHandler for App {
             let events = watcher.poll_events();
             for event in events {
                 self.handle_fs_event(event);
+            }
+        }
+
+        // Slideshow advancement
+        if self.slideshow.should_advance() {
+            if let Some(current) = self.selected_index {
+                let total = self.file_entries.iter().filter(|e| e.is_image()).count();
+                if let Some(next) = self.slideshow.next_index(current, total) {
+                    // Find actual index for image at position `next`
+                    let image_indices: Vec<usize> = self.file_entries.iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.is_image())
+                        .map(|(i, _)| i)
+                        .collect();
+                    if let Some(&actual_idx) = image_indices.get(next) {
+                        self.on_select(actual_idx);
+                        if let Some(entry) = self.file_entries.get(actual_idx).cloned() {
+                            self.load_image(&entry);
+                        }
+                    }
+                }
             }
         }
 
