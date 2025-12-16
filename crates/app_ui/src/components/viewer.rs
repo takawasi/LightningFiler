@@ -133,6 +133,10 @@ impl ImageViewer {
         let available = ui.available_rect_before_wrap();
         let mut action = ViewerAction::None;
 
+        // Overlay dimensions
+        let bar_height = 40.0;
+        let seek_height = 24.0;
+
         // Check mouse movement for overlay visibility
         let pointer_pos = ui.input(|i| i.pointer.hover_pos());
         if pointer_pos.is_some() {
@@ -149,9 +153,6 @@ impl ImageViewer {
                 self.overlay_visible = false;
             }
         }
-
-        // Handle input
-        self.handle_input(ui, available);
 
         // Draw background
         ui.painter().rect_filled(
@@ -179,9 +180,29 @@ impl ImageViewer {
             );
         }
 
-        // Draw overlay UI (Doc 4 spec)
+        // Draw overlay UI (Doc 4 spec) - MUST process before handle_input to get seek bar clicks
         if self.overlay_visible && self.texture.is_some() {
-            action = self.draw_overlay(ui, available);
+            if let Some(overlay_action) = self.draw_overlay(ui, available) {
+                action = overlay_action;
+            }
+        }
+
+        // Handle input for main image area (excluding overlay areas)
+        // Only if no overlay action was taken
+        if matches!(action, ViewerAction::None) {
+            let image_area = if self.overlay_visible && self.texture.is_some() {
+                // Exclude top bar and seek bar from input area
+                Rect::from_min_max(
+                    Pos2::new(available.min.x, available.min.y + bar_height),
+                    Pos2::new(available.max.x, available.max.y - seek_height),
+                )
+            } else {
+                available
+            };
+
+            if let Some(input_action) = self.handle_input(ui, image_area) {
+                action = input_action;
+            }
         }
 
         action
@@ -195,8 +216,8 @@ impl ImageViewer {
     }
 
     /// Draw Doc 4 overlay UI
-    fn draw_overlay(&mut self, ui: &mut Ui, rect: Rect) -> ViewerAction {
-        let mut action = ViewerAction::None;
+    fn draw_overlay(&mut self, ui: &mut Ui, rect: Rect) -> Option<ViewerAction> {
+        let mut action: Option<ViewerAction> = None;
         let bar_height = 40.0;
         let seek_height = 24.0;
         let bg_color = Color32::from_rgba_unmultiplied(0, 0, 0, 180);
@@ -248,7 +269,7 @@ impl ImageViewer {
             ui.painter().text(btn_pos, Align2::CENTER_CENTER, label, FontId::proportional(16.0), color);
 
             if response.clicked() {
-                action = btn_action;
+                action = Some(btn_action);
             }
         }
 
@@ -270,7 +291,7 @@ impl ImageViewer {
         let ss_color = if slideshow_response.hovered() { Color32::WHITE } else { Color32::LIGHT_GRAY };
         ui.painter().text(slideshow_pos, Align2::CENTER_CENTER, ss_label, FontId::proportional(16.0), ss_color);
         if slideshow_response.clicked() {
-            action = ViewerAction::ToggleSlideshow;
+            action = Some(ViewerAction::ToggleSlideshow);
         }
 
         // Right: Settings, Fullscreen, Close
@@ -290,7 +311,7 @@ impl ImageViewer {
             ui.painter().text(btn_pos, Align2::CENTER_CENTER, label, FontId::proportional(16.0), color);
 
             if response.clicked() {
-                action = btn_action;
+                action = Some(btn_action);
             }
         }
 
@@ -338,7 +359,7 @@ impl ImageViewer {
                 if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                     let relative_x = (pos.x - track_rect.min.x) / track_rect.width();
                     let seek_pos = relative_x.clamp(0.0, 1.0);
-                    action = ViewerAction::SeekTo(seek_pos);
+                    action = Some(ViewerAction::SeekTo(seek_pos));
                 }
             }
         }
@@ -346,7 +367,7 @@ impl ImageViewer {
         action
     }
 
-    fn handle_input(&mut self, ui: &mut Ui, rect: Rect) {
+    fn handle_input(&mut self, ui: &mut Ui, rect: Rect) -> Option<ViewerAction> {
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
         // Zoom with scroll
@@ -375,10 +396,12 @@ impl ImageViewer {
             self.drag_start = None;
         }
 
-        // Double-click to reset
+        // Double-click to close viewer (return to browser)
         if response.double_clicked() {
-            self.reset_view();
+            return Some(ViewerAction::Close);
         }
+
+        None
     }
 
     fn calculate_display_size(&self, available: Vec2) -> Vec2 {

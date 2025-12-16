@@ -380,8 +380,8 @@ impl App {
     }
 
     /// Load thumbnail texture for a file entry
-    /// Returns TextureId if thumbnail is cached, None otherwise (triggers async generation)
-    fn load_thumbnail_texture(&mut self, entry: &FileEntry) -> Option<egui::TextureId> {
+    /// Returns TextureHandle if thumbnail is cached, None otherwise (triggers async generation)
+    fn load_thumbnail_texture(&mut self, entry: &FileEntry) -> Option<egui::TextureHandle> {
         let Some(ref thumbnail_manager) = self.thumbnail_manager else {
             return None;
         };
@@ -390,7 +390,7 @@ impl App {
 
         // Check if texture already loaded
         if let Some(texture_handle) = self.thumbnail_textures.get(&path_hash) {
-            return Some(texture_handle.id());
+            return Some(texture_handle.clone());
         }
 
         // Try to get cached thumbnail (sync)
@@ -407,10 +407,9 @@ impl App {
                 egui::TextureOptions::LINEAR,
             );
 
-            let texture_id = texture_handle.id();
-            self.thumbnail_textures.insert(path_hash, texture_handle);
+            self.thumbnail_textures.insert(path_hash, texture_handle.clone());
 
-            return Some(texture_id);
+            return Some(texture_handle);
         }
 
         // Not cached - request async generation
@@ -1331,18 +1330,9 @@ impl App {
                     }
                 });
             } else {
-                // Full viewer mode - handle double-click to close
-                let viewer_response = ui.allocate_response(
-                    ui.available_size(),
-                    egui::Sense::click(),
-                );
-
-                // Double-click to return to browser
-                if viewer_response.double_clicked() {
-                    self.show_browser = true;
-                }
-
-                // Render viewer
+                // Full viewer mode
+                // Note: Double-click to close is handled inside image_viewer.ui()
+                // Do NOT allocate_response here as it blocks seek bar interaction
                 let action = self.image_viewer.ui(ui);
                 self.handle_viewer_action(action);
             }
@@ -1351,7 +1341,7 @@ impl App {
 
     /// Update catalog items from current file entries
     fn update_catalog_items(&mut self) {
-        // Only update if entries changed
+        // Rebuild catalog if entries changed
         if self.catalog_items.len() != self.file_entries.len() {
             self.catalog_items = self.file_entries.iter().map(|e| {
                 let mut item = ThumbnailItem::new(
@@ -1369,6 +1359,19 @@ impl App {
 
                 item
             }).collect();
+        } else {
+            // Update thumbnails for existing items that don't have one yet
+            for (idx, entry) in self.file_entries.iter().enumerate() {
+                if entry.is_image() {
+                    if let Some(item) = self.catalog_items.get_mut(idx) {
+                        if item.texture.is_none() {
+                            if let Some(texture) = self.load_thumbnail_texture(entry) {
+                                item.set_texture(texture);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
