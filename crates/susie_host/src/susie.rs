@@ -2,12 +2,17 @@
 //!
 //! Susie plugins (.spi) are 32-bit Windows DLLs that implement a specific API
 //! for image decoding and archive handling.
+//!
+//! This module is Windows-only. On non-Windows platforms, stub types are provided.
 
+#[cfg(windows)]
 use libloading::{Library, Symbol};
 use std::ffi::{c_char, c_int, c_void};
+#[cfg(windows)]
 use std::path::Path;
 
 /// Susie plugin handle
+#[cfg(windows)]
 pub struct SusiePlugin {
     _library: Library,
     get_plugin_info: GetPluginInfo,
@@ -17,12 +22,23 @@ pub struct SusiePlugin {
     get_file: Option<GetFile>,
 }
 
-// Susie API function types
+#[cfg(not(windows))]
+pub struct SusiePlugin {
+    _dummy: (),
+}
+
+// Susie API function types (Windows only - stdcall calling convention)
+#[cfg(windows)]
 type GetPluginInfo = unsafe extern "stdcall" fn(c_int, *mut c_char, c_int) -> c_int;
+#[cfg(windows)]
 type IsSupported = unsafe extern "stdcall" fn(*const c_char, *const c_void) -> c_int;
+#[cfg(windows)]
 type GetPicture = unsafe extern "stdcall" fn(*const c_char, i32, u32, *mut *mut c_void, *mut *mut c_void, ProgressCallback, i32) -> c_int;
+#[cfg(windows)]
 type GetArchiveInfo = unsafe extern "stdcall" fn(*const c_char, i32, u32, *mut *mut c_void) -> c_int;
+#[cfg(windows)]
 type GetFile = unsafe extern "stdcall" fn(*const c_char, i32, *mut c_char, u32, ProgressCallback, i32) -> c_int;
+#[cfg(windows)]
 type ProgressCallback = Option<extern "stdcall" fn(c_int, c_int, i32) -> c_int>;
 
 /// Plugin info types
@@ -35,6 +51,7 @@ pub const SPI_UNSUPPORTED: c_int = -1;
 pub const SPI_ABORT: c_int = 1;
 pub const SPI_ERROR: c_int = 2;
 
+#[cfg(windows)]
 impl SusiePlugin {
     /// Load a Susie plugin from a file
     pub unsafe fn load(path: &Path) -> anyhow::Result<Self> {
@@ -122,11 +139,18 @@ impl SusiePlugin {
 }
 
 /// Plugin manager for loading and managing multiple plugins
+#[cfg(windows)]
 pub struct PluginManager {
     plugins: Vec<(u32, SusiePlugin)>,
     next_id: u32,
 }
 
+#[cfg(not(windows))]
+pub struct PluginManager {
+    _dummy: (),
+}
+
+#[cfg(windows)]
 impl PluginManager {
     pub fn new() -> Self {
         Self {
@@ -170,6 +194,21 @@ impl PluginManager {
     }
 }
 
+#[cfg(windows)]
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(windows))]
+impl PluginManager {
+    pub fn new() -> Self {
+        Self { _dummy: () }
+    }
+}
+
+#[cfg(not(windows))]
 impl Default for PluginManager {
     fn default() -> Self {
         Self::new()

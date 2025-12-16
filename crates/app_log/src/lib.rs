@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use directories::ProjectDirs;
 
 /// Get the application log directory
+/// Spec: %APPDATA%\LightningFiler\logs\
 pub fn log_dir() -> PathBuf {
-    ProjectDirs::from("com", "LightningFiler", "LightningFiler")
+    ProjectDirs::from("", "", "LightningFiler")
         .map(|dirs| dirs.data_dir().join("logs"))
         .unwrap_or_else(|| PathBuf::from("./logs"))
 }

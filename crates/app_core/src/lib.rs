@@ -17,20 +17,27 @@ pub mod navigation;
 pub mod resource;
 pub mod i18n;
 pub mod image_loader;
+pub mod thumbnail_manager;
 
 pub use state::AppState;
-pub use config::AppConfig;
+pub use config::{
+    AppConfig, GeneralConfig, ViewerConfig, FilerConfig, NavigationConfig,
+    FitMode, Interpolation, SpreadMode, ReadingDirection,
+    SortBy, SortOrder, ViewMode,
+};
 pub use command::{
     Command, CommandId, CommandDispatcher, CommandParams, CommandHandler,
     // Enums
     CenterMode, ZoomMode, Direction, ScrollUnit, Position, SyncMode,
-    SlideshowAction, SlideshowOrder, FlipAxis, SpreadMode, BackgroundColor,
+    SlideshowAction, SlideshowOrder, FlipAxis, BackgroundColor,
     InfoLevel, TransitionMode, PathFormat, LabelColor, CopyTarget,
 };
+// Note: SpreadMode is exported from config module
 pub use error::AppError;
 pub use navigation::{NavigationContext, NavigationState, GridLayout, SelectionState, FileEntry as NavFileEntry};
 pub use resource::ResourceManager;
 pub use image_loader::{ImageLoader, LoadedImage, ThumbnailGenerator, is_supported_image, get_image_dimensions};
+pub use thumbnail_manager::{ThumbnailManager, ThumbnailSize, CacheStats};
 
 use once_cell::sync::OnceCell;
 

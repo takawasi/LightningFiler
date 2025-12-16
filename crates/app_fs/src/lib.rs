@@ -13,13 +13,15 @@ mod vfs;
 mod watcher;
 mod sanitize;
 mod browser;
+mod file_operations;
 
 pub use universal_path::UniversalPath;
 pub use encoding::{detect_encoding, decode_bytes, EncodingHint};
 pub use vfs::{VirtualFileSystem, VfsEntry, VfsError};
-pub use watcher::{FileWatcher, WatchEvent};
+pub use watcher::{FileWatcher, FsEvent};
 pub use sanitize::{sanitize_filename, SanitizeMode};
 pub use browser::{FileEntry, ListOptions, SortBy, SortOrder, list_directory, list_drives, get_parent, is_root, get_siblings, get_next_sibling, get_prev_sibling, count_files};
+pub use file_operations::{FileOperations, DefaultFileOperations, FileOpError, ClipboardMode};
 
 use thiserror::Error;
 

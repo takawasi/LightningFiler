@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::config::SpreadMode;
 
 /// Command identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -324,8 +325,7 @@ pub enum SlideshowOrder { Normal, Reverse, Shuffle, Random }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlipAxis { Horizontal, Vertical }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpreadMode { Single, Spread, Auto }
+// Note: SpreadMode is imported from crate::config
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundColor { Black, Gray, Check, White, Transparent }

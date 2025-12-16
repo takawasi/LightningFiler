@@ -1,140 +1,124 @@
-//! File system watcher with debouncing
+//! File system watcher with notify-debouncer-mini
 
-use crate::UniversalPath;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_mini::{new_debouncer, DebouncedEvent, Debouncer};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver};
+use std::time::Duration;
 
 /// File system event types
-#[derive(Debug, Clone)]
-pub enum WatchEvent {
-    Created(UniversalPath),
-    Modified(UniversalPath),
-    Deleted(UniversalPath),
-    Renamed { from: UniversalPath, to: UniversalPath },
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsEvent {
+    Created(PathBuf),
+    Modified(PathBuf),
+    Removed(PathBuf),
+    Renamed { from: PathBuf, to: PathBuf },
 }
 
-/// File system watcher with event debouncing
+/// File system watcher with debouncing
 pub struct FileWatcher {
-    watcher: RecommendedWatcher,
-    event_rx: mpsc::Receiver<WatchEvent>,
-    watched_paths: Vec<UniversalPath>,
+    debouncer: Debouncer<RecommendedWatcher>,
+    event_rx: Receiver<Result<Vec<DebouncedEvent>, notify::Error>>,
+    watched_paths: Vec<PathBuf>,
 }
 
 impl FileWatcher {
-    /// Create a new file watcher with debounce interval
-    pub fn new(debounce_ms: u64) -> notify::Result<Self> {
-        let (raw_tx, raw_rx) = mpsc::channel::<notify::Result<Event>>();
-        let (event_tx, event_rx) = mpsc::channel::<WatchEvent>();
+    /// Create a new file watcher with 100ms debounce
+    pub fn new() -> Result<Self, notify::Error> {
+        let (tx, rx) = channel();
 
-        let watcher = RecommendedWatcher::new(
-            move |res| {
-                let _ = raw_tx.send(res);
-            },
-            Config::default(),
+        let debouncer = new_debouncer(
+            Duration::from_millis(100),  // 100ms debounce
+            tx,
         )?;
 
-        // Start debounce thread
-        let debounce_duration = Duration::from_millis(debounce_ms);
-        std::thread::spawn(move || {
-            Self::debounce_loop(raw_rx, event_tx, debounce_duration);
-        });
-
         Ok(Self {
-            watcher,
-            event_rx,
+            debouncer,
+            event_rx: rx,
             watched_paths: Vec::new(),
         })
     }
 
-    /// Watch a directory for changes
-    pub fn watch(&mut self, path: &UniversalPath, recursive: bool) -> notify::Result<()> {
-        let mode = if recursive {
-            RecursiveMode::Recursive
-        } else {
-            RecursiveMode::NonRecursive
-        };
-
-        self.watcher.watch(path.as_path(), mode)?;
-        self.watched_paths.push(path.clone());
-
-        tracing::info!("Watching: {}", path);
+    /// Watch a path for changes (non-recursive)
+    pub fn watch(&mut self, path: &Path) -> Result<(), notify::Error> {
+        self.debouncer.watcher().watch(path, RecursiveMode::NonRecursive)?;
+        self.watched_paths.push(path.to_path_buf());
+        tracing::info!("Watching: {}", path.display());
         Ok(())
     }
 
-    /// Stop watching a directory
-    pub fn unwatch(&mut self, path: &UniversalPath) -> notify::Result<()> {
-        self.watcher.unwatch(path.as_path())?;
-        self.watched_paths.retain(|p| p.id() != path.id());
-
-        tracing::info!("Stopped watching: {}", path);
+    /// Stop watching a path
+    pub fn unwatch(&mut self, path: &Path) -> Result<(), notify::Error> {
+        self.debouncer.watcher().unwatch(path)?;
+        self.watched_paths.retain(|p| p != path);
+        tracing::info!("Unwatched: {}", path.display());
         Ok(())
     }
 
-    /// Try to receive the next event (non-blocking)
-    pub fn try_recv(&self) -> Option<WatchEvent> {
-        self.event_rx.try_recv().ok()
-    }
+    /// Poll for file system events (non-blocking)
+    pub fn poll_events(&self) -> Vec<FsEvent> {
+        let mut events = Vec::new();
 
-    /// Receive the next event (blocking)
-    pub fn recv(&self) -> Option<WatchEvent> {
-        self.event_rx.recv().ok()
-    }
-
-    /// Receive with timeout
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<WatchEvent> {
-        self.event_rx.recv_timeout(timeout).ok()
-    }
-
-    /// Debounce loop - consolidates rapid events into single notifications
-    fn debounce_loop(
-        raw_rx: mpsc::Receiver<notify::Result<Event>>,
-        event_tx: mpsc::Sender<WatchEvent>,
-        debounce_duration: Duration,
-    ) {
-        let mut pending: HashMap<PathBuf, (notify::EventKind, Instant)> = HashMap::new();
-
-        loop {
-            // Check for new raw events
-            match raw_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ok(event)) => {
-                    for path in event.paths {
-                        pending.insert(path, (event.kind, Instant::now()));
+        while let Ok(result) = self.event_rx.try_recv() {
+            match result {
+                Ok(debounced_events) => {
+                    for event in debounced_events {
+                        if let Some(fs_event) = Self::convert_event(event) {
+                            events.push(fs_event);
+                        }
                     }
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("Watch error: {:?}", e);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-
-            // Process pending events that have settled
-            let now = Instant::now();
-            let settled: Vec<_> = pending
-                .iter()
-                .filter(|(_, (_, time))| now.duration_since(*time) >= debounce_duration)
-                .map(|(path, (kind, _))| (path.clone(), *kind))
-                .collect();
-
-            for (path, kind) in settled {
-                pending.remove(&path);
-
-                let universal_path = UniversalPath::new(&path);
-
-                let event = match kind {
-                    notify::EventKind::Create(_) => WatchEvent::Created(universal_path),
-                    notify::EventKind::Modify(_) => WatchEvent::Modified(universal_path),
-                    notify::EventKind::Remove(_) => WatchEvent::Deleted(universal_path),
-                    _ => continue,
-                };
-
-                if event_tx.send(event).is_err() {
-                    break;
+                Err(e) => {
+                    tracing::warn!("Watcher error: {:?}", e);
                 }
             }
+        }
+
+        // Deduplication: remove consecutive Modified events for the same path
+        events.dedup_by(|a, b| {
+            match (a, b) {
+                (FsEvent::Modified(p1), FsEvent::Modified(p2)) => p1 == p2,
+                _ => false,
+            }
+        });
+
+        events
+    }
+
+    /// Convert debounced event to FsEvent
+    fn convert_event(event: DebouncedEvent) -> Option<FsEvent> {
+        use notify_debouncer_mini::DebouncedEventKind;
+
+        match event.kind {
+            DebouncedEventKind::Any => {
+                // Check if path exists to determine event type
+                if event.path.exists() {
+                    // Try to detect if it's newly created (within 1 second)
+                    if event.path.metadata()
+                        .and_then(|m| m.created())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .map(|elapsed| elapsed < Duration::from_secs(1))
+                        .unwrap_or(false)
+                    {
+                        Some(FsEvent::Created(event.path))
+                    } else {
+                        Some(FsEvent::Modified(event.path))
+                    }
+                } else {
+                    Some(FsEvent::Removed(event.path))
+                }
+            }
+            DebouncedEventKind::AnyContinuous => None,
+            _ => None,
+        }
+    }
+}
+
+impl Drop for FileWatcher {
+    fn drop(&mut self) {
+        for path in &self.watched_paths {
+            let _ = self.debouncer.watcher().unwatch(path);
         }
     }
 }
@@ -145,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_watcher_creation() {
-        let watcher = FileWatcher::new(100);
+        let watcher = FileWatcher::new();
         assert!(watcher.is_ok());
     }
 }

@@ -51,6 +51,9 @@ fn panic_handler(info: &PanicHookInfo) {
     // 4. Show error dialog on Windows
     #[cfg(windows)]
     show_error_dialog(&dump_path, info);
+
+    // 5. Forced termination (as per spec section 2.2)
+    std::process::exit(1);
 }
 
 #[cfg(windows)]

@@ -253,7 +253,7 @@ fn default_keybindings() -> HashMap<String, Vec<String>> {
     kb.insert("nav.move_left".into(), vec!["Left".into(), "h".into()]);
     kb.insert("nav.move_right".into(), vec!["Right".into(), "l".into()]);
     kb.insert("nav.page_up".into(), vec!["PageUp".into()]);
-    kb.insert("nav.page_down".into(), vec!["PageDown".into(), "Space".into()]);
+    kb.insert("nav.page_down".into(), vec!["PageDown".into()]);
     kb.insert("nav.home".into(), vec!["Home".into()]);
     kb.insert("nav.end".into(), vec!["End".into()]);
 

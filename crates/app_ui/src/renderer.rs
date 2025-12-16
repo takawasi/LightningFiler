@@ -11,6 +11,8 @@ pub struct Renderer {
     pub queue: Queue,
     pub config: SurfaceConfiguration,
     pub size: (u32, u32),
+    window: Arc<Window>,
+    instance: Instance,
 }
 
 impl Renderer {
@@ -74,6 +76,8 @@ impl Renderer {
             queue,
             config,
             size: (size.width, size.height),
+            window,
+            instance,
         })
     }
 
@@ -87,10 +91,80 @@ impl Renderer {
         }
     }
 
-    /// Handle device lost - recreate everything
-    pub fn handle_device_lost(&mut self) {
-        tracing::warn!("GPU device lost, reconfiguring surface");
-        self.surface.configure(&self.device, &self.config);
+    /// Handle device lost - recreate everything (Doc 1 Section 7.2)
+    ///
+    /// Recovery Flow:
+    /// 1. Drop existing GPU resources (implicit via reassignment)
+    /// 2. Re-create: Request new adapter and device
+    /// 3. Re-configure: Set up surface with new device
+    ///
+    /// Note: Caller (App) is responsible for:
+    /// - Pause: Stopping render loop before calling this
+    /// - Re-load: Reloading active textures after this returns
+    /// - Resume: Restarting render loop
+    pub async fn recover_from_device_lost(&mut self) -> anyhow::Result<()> {
+        tracing::warn!("GPU device lost - starting recovery procedure");
+
+        // Step 1: Drop (implicit - existing device/queue will be dropped when replaced)
+
+        // Step 2: Re-create Surface
+        let surface = self.instance.create_surface(self.window.clone())?;
+
+        // Step 3: Re-create Adapter
+        let adapter = self.instance
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No suitable GPU adapter found during recovery"))?;
+
+        tracing::info!("Recovery: Using GPU: {:?}", adapter.get_info().name);
+
+        // Step 4: Re-create Device and Queue
+        let (device, queue) = adapter
+            .request_device(
+                &DeviceDescriptor {
+                    label: Some("LightningFiler Device (Recovered)"),
+                    required_features: Features::empty(),
+                    required_limits: Limits::default(),
+                    memory_hints: MemoryHints::Performance,
+                },
+                None,
+            )
+            .await?;
+
+        // Step 5: Re-create Surface Configuration
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: self.size.0.max(1),
+            height: self.size.1.max(1),
+            present_mode: PresentMode::AutoVsync,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        surface.configure(&device, &config);
+
+        // Step 6: Replace old resources with new ones
+        self.surface = surface;
+        self.device = device;
+        self.queue = queue;
+        self.config = config;
+
+        tracing::info!("GPU device recovery completed successfully");
+        Ok(())
     }
 
     /// Get the current surface texture for rendering

@@ -2,15 +2,17 @@
 //! Integrated with Doc 3 command system
 
 use anyhow::Result;
-use app_core::{state, is_supported_image, Command, CommandId, NavigationState};
+use app_core::{state, is_supported_image, Command, CommandId, NavigationState, ThumbnailManager, ThumbnailSize};
 use app_db::{MetadataDb, ThumbnailCache, DbPool};
-use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root, get_next_sibling, get_prev_sibling, count_files};
+use app_fs::{UniversalPath, FileEntry, ListOptions, list_directory, get_parent, is_root, get_next_sibling, get_prev_sibling, count_files, FileOperations, DefaultFileOperations, ClipboardMode, VirtualFileSystem, FileWatcher, FsEvent};
 use app_ui::{
-    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction, BrowserViewMode},
+    components::{FileBrowser, ImageViewer, StatusBar, StatusInfo, Toolbar, ToolbarAction, BrowserAction, BrowserViewMode, SettingsDialog, SettingsAction, ViewerAction, Dialog, DialogResult, ConfirmDialog, RenameDialog, TagEditDialog},
     InputHandler, Renderer, Theme,
 };
 use egui_wgpu::ScreenDescriptor;
+use std::collections::{HashSet, HashMap};
 use std::sync::Arc;
+use std::path::PathBuf;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
@@ -29,6 +31,7 @@ struct App {
     // UI Components
     file_browser: FileBrowser,
     image_viewer: ImageViewer,
+    settings_dialog: SettingsDialog,
     input_handler: Option<InputHandler>,
     theme: Theme,
 
@@ -38,7 +41,11 @@ struct App {
     // Database
     db_pool: Option<DbPool>,
     metadata_db: Option<MetadataDb>,
-    thumbnail_cache: Option<ThumbnailCache>,
+    thumbnail_cache: Option<Arc<ThumbnailCache>>,
+    thumbnail_manager: Option<ThumbnailManager>,
+
+    // Texture cache (path_hash -> TextureHandle)
+    thumbnail_textures: HashMap<u64, egui::TextureHandle>,
 
     // State
     show_browser: bool,
@@ -51,6 +58,31 @@ struct App {
     // Grid layout tracking
     grid_columns: usize,
     grid_visible_rows: usize,
+
+    // Temporary marks (cleared on exit)
+    marked_files: HashSet<u64>,
+
+    // Overlay UI state (Doc 4 spec)
+    overlay_visible: bool,
+    last_mouse_move: Option<std::time::Instant>,
+
+    // File operations
+    file_ops: Arc<DefaultFileOperations>,
+
+    // File watcher
+    file_watcher: Option<FileWatcher>,
+
+    // Archive support
+    current_archive: Option<VirtualFileSystem>,
+    archive_inner_path: String,
+    // Map from FileEntry.path.id() to archive inner path
+    archive_path_map: HashMap<u64, String>,
+
+    // Dialogs
+    confirm_dialog: Option<ConfirmDialog>,
+    rename_dialog: Option<RenameDialog>,
+    tag_dialog: Option<TagEditDialog>,
+    pending_delete_path: Option<PathBuf>,
 }
 
 impl App {
@@ -71,15 +103,32 @@ impl App {
         nav_state.enter_threshold = config.navigation.enter_threshold.unwrap_or(5);
 
         // Initialize database
-        let (db_pool, metadata_db, thumbnail_cache) = match app_db::init() {
+        let (db_pool, metadata_db, thumbnail_cache, thumbnail_manager) = match app_db::init() {
             Ok((pool, cache)) => {
                 let metadata_db = MetadataDb::new(pool.clone());
+                let cache_arc = Arc::new(cache);
+                let thumbnail_manager = ThumbnailManager::new(cache_arc.clone());
                 tracing::info!("Database initialized successfully");
-                (Some(pool), Some(metadata_db), Some(cache))
+                (Some(pool), Some(metadata_db), Some(cache_arc), Some(thumbnail_manager))
             }
             Err(e) => {
                 tracing::warn!("Failed to initialize database: {}. Running without persistence.", e);
-                (None, None, None)
+                (None, None, None, None)
+            }
+        };
+
+        // Initialize file watcher
+        let file_watcher = match FileWatcher::new() {
+            Ok(mut watcher) => {
+                // Watch the initial directory
+                if let Err(e) = watcher.watch(current_path.as_path()) {
+                    tracing::warn!("Failed to watch directory: {}", e);
+                }
+                Some(watcher)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create file watcher: {}", e);
+                None
             }
         };
 
@@ -92,6 +141,7 @@ impl App {
 
             file_browser: FileBrowser::new(),
             image_viewer: ImageViewer::new(),
+            settings_dialog: SettingsDialog::new(config.clone()),
             input_handler: None,
             theme: Theme::by_name(&config.general.theme),
 
@@ -100,6 +150,9 @@ impl App {
             db_pool,
             metadata_db,
             thumbnail_cache,
+            thumbnail_manager,
+
+            thumbnail_textures: HashMap::new(),
 
             show_browser: true,
             status: StatusInfo {
@@ -117,6 +170,24 @@ impl App {
 
             grid_columns: 1,
             grid_visible_rows: 10,
+
+            marked_files: HashSet::new(),
+
+            overlay_visible: true,
+            last_mouse_move: None,
+
+            file_ops: Arc::new(DefaultFileOperations::new()),
+
+            file_watcher,
+
+            current_archive: None,
+            archive_inner_path: String::new(),
+            archive_path_map: HashMap::new(),
+
+            confirm_dialog: None,
+            rename_dialog: None,
+            tag_dialog: None,
+            pending_delete_path: None,
         }
     }
 
@@ -166,6 +237,16 @@ impl App {
 
     /// Navigate to a directory
     fn navigate_to(&mut self, path: UniversalPath) {
+        // Unwatch previous path
+        if let Some(ref mut watcher) = self.file_watcher {
+            let _ = watcher.unwatch(self.current_path.as_path());
+        }
+
+        // Clear archive state when navigating to a regular directory
+        self.current_archive = None;
+        self.archive_inner_path.clear();
+        self.archive_path_map.clear();
+
         match list_directory(path.as_path(), &ListOptions::default()) {
             Ok(entries) => {
                 self.current_path = path.clone();
@@ -173,6 +254,14 @@ impl App {
                 self.selected_index = None;
                 self.status.file_name = path.to_string();
                 self.status.message = format!("{} items", self.file_entries.len());
+
+                // Watch new path
+                if let Some(ref mut watcher) = self.file_watcher {
+                    let _ = watcher.watch(path.as_path());
+                }
+
+                // Request thumbnails for image files
+                self.request_thumbnails_for_current_directory();
 
                 // Update global state
                 if let Some(state) = state() {
@@ -186,8 +275,146 @@ impl App {
         }
     }
 
+    /// Enter an archive file and display its contents as if it were a directory
+    fn enter_archive(&mut self, archive_path: UniversalPath) {
+        match VirtualFileSystem::open(archive_path.as_path()) {
+            Ok(vfs) => {
+                match vfs.list_entries() {
+                    Ok(vfs_entries) => {
+                        // Clear previous archive path mappings
+                        self.archive_path_map.clear();
+
+                        // Convert VfsEntry to FileEntry for display
+                        let file_entries: Vec<FileEntry> = vfs_entries.iter().filter_map(|ve| {
+                            // Create a pseudo-path for the archive entry
+                            let entry_path = archive_path.join(&ve.path);
+
+                            // Store mapping from entry path ID to archive inner path
+                            self.archive_path_map.insert(entry_path.id(), ve.path.clone());
+
+                            Some(FileEntry {
+                                path: entry_path,
+                                name: ve.name.clone(),
+                                is_dir: ve.is_dir,
+                                is_hidden: false,
+                                size: ve.size,
+                                modified: ve.modified,
+                                extension: std::path::Path::new(&ve.name)
+                                    .extension()
+                                    .map(|e| e.to_string_lossy().to_lowercase())
+                                    .unwrap_or_default(),
+                            })
+                        }).collect();
+
+                        self.current_archive = Some(vfs);
+                        self.archive_inner_path = String::new();
+                        self.file_entries = file_entries;
+                        self.selected_index = None;
+                        self.status.message = format!("Archive: {} ({} items)",
+                            archive_path.display(), self.file_entries.len());
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to list archive entries: {}", e);
+                        self.status.message = format!("Archive error: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to open archive: {}", e);
+                self.status.message = format!("Cannot open archive: {}", e);
+            }
+        }
+    }
+
+    /// Request thumbnails for all image files in current directory
+    /// This pre-generates thumbnails in the background
+    fn request_thumbnails_for_current_directory(&mut self) {
+        let Some(ref thumbnail_manager) = self.thumbnail_manager else {
+            return;
+        };
+
+        let thumbnail_manager = thumbnail_manager.clone();
+
+        // Collect image entries
+        let image_entries: Vec<_> = self.file_entries.iter()
+            .filter(|e| e.is_image())
+            .map(|e| e.path.clone())
+            .collect();
+
+        // Spawn async task to pre-generate thumbnails
+        tokio::spawn(async move {
+            for path in image_entries {
+                // This will generate and cache thumbnails in the background
+                let _ = thumbnail_manager.get_thumbnail(path, ThumbnailSize::Small).await;
+            }
+        });
+    }
+
+    /// Load thumbnail texture for a file entry
+    /// Returns TextureId if thumbnail is cached, None otherwise (triggers async generation)
+    fn load_thumbnail_texture(&mut self, entry: &FileEntry) -> Option<egui::TextureId> {
+        let Some(ref thumbnail_manager) = self.thumbnail_manager else {
+            return None;
+        };
+
+        let path_hash = entry.path.id();
+
+        // Check if texture already loaded
+        if let Some(texture_handle) = self.thumbnail_textures.get(&path_hash) {
+            return Some(texture_handle.id());
+        }
+
+        // Try to get cached thumbnail (sync)
+        if let Some(loaded) = thumbnail_manager.get_cached_sync(entry.path.as_path(), ThumbnailSize::Small) {
+            // Create egui texture
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [loaded.width as usize, loaded.height as usize],
+                &loaded.data,
+            );
+
+            let texture_handle = self.egui_ctx.load_texture(
+                entry.name.clone(),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+
+            let texture_id = texture_handle.id();
+            self.thumbnail_textures.insert(path_hash, texture_handle);
+
+            return Some(texture_id);
+        }
+
+        // Not cached - request async generation
+        let thumbnail_manager = thumbnail_manager.clone();
+        let path = entry.path.clone();
+        let egui_ctx = self.egui_ctx.clone();
+
+        tokio::spawn(async move {
+            if let Ok(_) = thumbnail_manager.get_thumbnail(path, ThumbnailSize::Small).await {
+                // Request repaint to show the newly generated thumbnail
+                egui_ctx.request_repaint();
+            }
+        });
+
+        None
+    }
+
     /// Navigate up to parent directory
     fn navigate_up(&mut self) {
+        // If we're in an archive, exit the archive first
+        if self.current_archive.is_some() {
+            self.current_archive = None;
+            self.archive_inner_path.clear();
+            self.archive_path_map.clear();
+            // Reload the directory containing the archive
+            let path = self.current_path.clone();
+            if let Some(parent) = get_parent(path.as_path()) {
+                self.navigate_to(parent);
+            }
+            return;
+        }
+
+        // Normal directory navigation
         if !is_root(self.current_path.as_path()) {
             if let Some(parent) = get_parent(self.current_path.as_path()) {
                 self.navigate_to(parent);
@@ -203,8 +430,31 @@ impl App {
 
         tracing::info!("Loading image: {}", entry.path);
 
-        // Load image data
-        match image::open(entry.path.as_path()) {
+        // Load image data - handle both filesystem and archive
+        let image_result = if let Some(ref vfs) = self.current_archive {
+            // Loading from archive - get the inner path from mapping
+            if let Some(inner_path) = self.archive_path_map.get(&entry.path.id()) {
+                match vfs.read_file(inner_path) {
+                    Ok(data) => {
+                        image::load_from_memory(&data)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to read from archive: {}", e);
+                        Err(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    }
+                }
+            } else {
+                tracing::error!("Archive path not found in mapping");
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Archive path not found"))
+            }
+        } else {
+            // Loading from filesystem
+            image::open(entry.path.as_path())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        };
+
+        match image_result {
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 let (width, height) = rgba.dimensions();
@@ -225,6 +475,12 @@ impl App {
                 // Update viewer
                 self.image_viewer.set_image(texture.id(), width, height);
                 self.current_texture = Some(texture);
+
+                // Update viewer overlay info (Doc 4)
+                self.image_viewer.file_name = entry.name.clone();
+                self.image_viewer.resolution_text = format!("{}×{}", width, height);
+                self.image_viewer.current_index = self.selected_index.map(|i| i + 1).unwrap_or(1);
+                self.image_viewer.total_files = self.file_entries.len();
 
                 // Update status
                 self.status.file_name = entry.name.clone();
@@ -260,6 +516,8 @@ impl App {
         if let Some(entry) = self.file_entries.get(index).cloned() {
             if entry.is_dir {
                 self.navigate_to(entry.path);
+            } else if entry.is_archive() {
+                self.enter_archive(entry.path);
             } else if entry.is_image() {
                 self.load_image(&entry);
                 self.show_browser = false; // Switch to viewer mode
@@ -304,8 +562,8 @@ impl App {
                 self.load_image(&entry);
                 self.show_browser = false;
             } else if entry.is_archive() {
-                // Archive - could implement archive viewing later
-                self.status.message = "Archive viewing not yet implemented".to_string();
+                // Archive - open as directory
+                self.enter_archive(entry.path);
             }
         }
     }
@@ -332,6 +590,32 @@ impl App {
 
         // Find previous image file
         for i in (0..current).rev() {
+            if let Some(entry) = self.file_entries.get(i) {
+                if entry.is_image() {
+                    self.on_select(i);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Navigate to first image
+    fn first_image(&mut self) {
+        // Find first image file
+        for i in 0..self.file_entries.len() {
+            if let Some(entry) = self.file_entries.get(i) {
+                if entry.is_image() {
+                    self.on_select(i);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Navigate to last image
+    fn last_image(&mut self) {
+        // Find last image file
+        for i in (0..self.file_entries.len()).rev() {
             if let Some(entry) = self.file_entries.get(i) {
                 if entry.is_image() {
                     self.on_select(i);
@@ -381,9 +665,41 @@ impl App {
         let selected_index = self.selected_index;
         let entries = self.file_entries.clone();
 
+        // Viewer state for rendering
+        let viewer_texture = self.image_viewer.texture;
+        let viewer_image_size = self.image_viewer.image_size;
+        let viewer_zoom = self.image_viewer.zoom;
+        let viewer_pan = self.image_viewer.pan;
+        let viewer_rotation = self.image_viewer.rotation;
+        let viewer_fit_mode = self.image_viewer.fit_mode;
+
         // Track UI actions from egui closure
         let mut clicked_index: Option<usize> = None;
         let mut double_clicked_index: Option<usize> = None;
+
+        // Track dialog results for post-closure handling
+        let mut confirm_result: Option<bool> = None;
+        let mut rename_result: Option<String> = None;
+        let mut tag_result: Option<Vec<String>> = None;
+
+        // Track viewer input for post-closure handling
+        let mut viewer_zoom_delta: f32 = 0.0;
+        let mut viewer_pan_delta = egui::Vec2::ZERO;
+        let mut viewer_drag_started = false;
+        let mut viewer_drag_ended = false;
+        let mut viewer_double_clicked = false;
+
+        // Overlay UI state
+        let overlay_visible = self.overlay_visible;
+        let image_count: usize = entries.iter().filter(|e| e.is_image()).count();
+        let current_image_pos: usize = if let Some(idx) = selected_index {
+            entries.iter().take(idx + 1).filter(|e| e.is_image()).count()
+        } else {
+            0
+        };
+        let mut mouse_moved = false;
+        let mut seek_bar_clicked: Option<f32> = None;
+        let mut nav_action: Option<&str> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             // Top panel - Toolbar
@@ -426,12 +742,293 @@ impl App {
                         }
                     });
                 } else {
-                    // Image viewer mode
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Image Viewer");
-                    });
+                    // Image viewer mode - Doc 4 compliant
+                    let available = ui.available_rect_before_wrap();
+
+                    // Draw dark background
+                    ui.painter().rect_filled(
+                        available,
+                        0.0,
+                        egui::Color32::from_rgb(32, 32, 32),
+                    );
+
+                    // Allocate rect for input handling
+                    let response = ui.allocate_rect(available, egui::Sense::click_and_drag());
+
+                    // Handle zoom with scroll wheel (Doc 4: cursor-centered zoom)
+                    if response.hovered() {
+                        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+                        if scroll != 0.0 {
+                            viewer_zoom_delta = scroll;
+                        }
+                    }
+
+                    // Handle pan with drag (Doc 4: 1:1 tracking, no inertia)
+                    if response.drag_started() {
+                        viewer_drag_started = true;
+                    }
+                    if response.dragged() {
+                        viewer_pan_delta = response.drag_delta();
+                    }
+                    if response.drag_stopped() {
+                        viewer_drag_ended = true;
+                    }
+
+                    // Double-click to reset view
+                    if response.double_clicked() {
+                        viewer_double_clicked = true;
+                    }
+
+                    // Render image if texture exists
+                    if let Some(texture_id) = viewer_texture {
+                        // Calculate display size based on fit mode
+                        let rotated_size = if viewer_rotation == 90 || viewer_rotation == 270 {
+                            egui::Vec2::new(viewer_image_size.y, viewer_image_size.x)
+                        } else {
+                            viewer_image_size
+                        };
+
+                        let base_scale = match viewer_fit_mode {
+                            app_ui::components::viewer::FitMode::FitToWindow => {
+                                let scale_x = available.width() / rotated_size.x;
+                                let scale_y = available.height() / rotated_size.y;
+                                scale_x.min(scale_y).min(1.0)
+                            }
+                            app_ui::components::viewer::FitMode::FitWidth => {
+                                available.width() / rotated_size.x
+                            }
+                            app_ui::components::viewer::FitMode::FitHeight => {
+                                available.height() / rotated_size.y
+                            }
+                            app_ui::components::viewer::FitMode::OriginalSize => 1.0,
+                        };
+
+                        let display_size = rotated_size * base_scale * viewer_zoom;
+                        let center = available.center() + viewer_pan;
+                        let image_rect = egui::Rect::from_center_size(center, display_size);
+
+                        // Draw image
+                        let uv = egui::Rect::from_min_max(
+                            egui::Pos2::ZERO,
+                            egui::Pos2::new(1.0, 1.0),
+                        );
+                        ui.painter().image(texture_id, image_rect, uv, egui::Color32::WHITE);
+
+                        // Check mouse activity for overlay visibility
+                        if ui.input(|i| i.pointer.delta().length() > 0.0) {
+                            mouse_moved = true;
+                        }
+
+                        // Draw overlay UI (Doc 4 spec) when visible
+                        if overlay_visible {
+                            let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180);
+                            let overlay_height = 36.0;
+
+                            // === Top Control Bar ===
+                            let top_bar = egui::Rect::from_min_size(
+                                available.left_top(),
+                                egui::Vec2::new(available.width(), overlay_height),
+                            );
+                            ui.painter().rect_filled(top_bar, 0.0, overlay_bg);
+
+                            // Left: File info
+                            if let Some(idx) = selected_index {
+                                if let Some(entry) = entries.get(idx) {
+                                    let info_text = format!(
+                                        "{} - {}×{}",
+                                        entry.name,
+                                        viewer_image_size.x as u32,
+                                        viewer_image_size.y as u32,
+                                    );
+                                    ui.painter().text(
+                                        top_bar.left_center() + egui::Vec2::new(10.0, 0.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        &info_text,
+                                        egui::FontId::proportional(14.0),
+                                        egui::Color32::WHITE,
+                                    );
+                                }
+                            }
+
+                            // Center: Navigation controls
+                            let nav_text = format!("{} / {}", current_image_pos, image_count);
+                            ui.painter().text(
+                                top_bar.center(),
+                                egui::Align2::CENTER_CENTER,
+                                &nav_text,
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::WHITE,
+                            );
+
+                            // Navigation buttons (simple text for now)
+                            let nav_left = top_bar.center() - egui::Vec2::new(80.0, 0.0);
+                            let nav_right = top_bar.center() + egui::Vec2::new(80.0, 0.0);
+                            ui.painter().text(
+                                nav_left - egui::Vec2::new(30.0, 0.0),
+                                egui::Align2::CENTER_CENTER,
+                                "<<",
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::GRAY,
+                            );
+                            ui.painter().text(
+                                nav_left,
+                                egui::Align2::CENTER_CENTER,
+                                "<",
+                                egui::FontId::proportional(16.0),
+                                egui::Color32::WHITE,
+                            );
+                            ui.painter().text(
+                                nav_right,
+                                egui::Align2::CENTER_CENTER,
+                                ">",
+                                egui::FontId::proportional(16.0),
+                                egui::Color32::WHITE,
+                            );
+                            ui.painter().text(
+                                nav_right + egui::Vec2::new(30.0, 0.0),
+                                egui::Align2::CENTER_CENTER,
+                                ">>",
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::GRAY,
+                            );
+
+                            // Right: Zoom info
+                            let zoom_text = format!("{:.0}%", viewer_zoom * base_scale * 100.0);
+                            ui.painter().text(
+                                top_bar.right_center() - egui::Vec2::new(10.0, 0.0),
+                                egui::Align2::RIGHT_CENTER,
+                                &zoom_text,
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::WHITE,
+                            );
+
+                            // === Bottom Seek Bar ===
+                            let seek_bar_height = 24.0;
+                            let seek_bar = egui::Rect::from_min_size(
+                                egui::Pos2::new(available.left(), available.bottom() - seek_bar_height),
+                                egui::Vec2::new(available.width(), seek_bar_height),
+                            );
+                            ui.painter().rect_filled(seek_bar, 0.0, overlay_bg);
+
+                            // Draw seek bar track
+                            let track_margin = 20.0;
+                            let track_rect = egui::Rect::from_min_max(
+                                egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
+                                egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
+                            );
+                            ui.painter().rect_filled(track_rect, 2.0, egui::Color32::DARK_GRAY);
+
+                            // Draw position indicator
+                            if image_count > 0 {
+                                let progress = current_image_pos as f32 / image_count as f32;
+                                let indicator_x = track_rect.left() + track_rect.width() * progress;
+                                let indicator_pos = egui::Pos2::new(indicator_x, seek_bar.center().y);
+                                ui.painter().circle_filled(indicator_pos, 6.0, egui::Color32::WHITE);
+
+                                // Filled portion
+                                let filled_rect = egui::Rect::from_min_max(
+                                    track_rect.left_top(),
+                                    egui::Pos2::new(indicator_x, track_rect.bottom()),
+                                );
+                                ui.painter().rect_filled(filled_rect, 2.0, egui::Color32::from_rgb(100, 150, 255));
+                            }
+
+                            // Handle seek bar click
+                            let seek_response = ui.allocate_rect(seek_bar, egui::Sense::click());
+                            if seek_response.clicked() {
+                                if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                    let relative_x = (pos.x - track_rect.left()) / track_rect.width();
+                                    seek_bar_clicked = Some(relative_x.clamp(0.0, 1.0));
+                                }
+                            }
+                        }
+                    } else {
+                        // No image placeholder
+                        ui.painter().text(
+                            available.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "No image loaded",
+                            egui::FontId::proportional(24.0),
+                            egui::Color32::GRAY,
+                        );
+                    }
                 }
             });
+
+            // Settings dialog (rendered on top)
+            if let Some(action) = self.settings_dialog.ui(ctx) {
+                match action {
+                    SettingsAction::Ok => {
+                        // Apply changes and close
+                        let new_config = self.settings_dialog.get_config().clone();
+                        if let Some(state) = state() {
+                            *state.config.write() = new_config.clone();
+                            if let Err(e) = new_config.save() {
+                                tracing::error!("Failed to save config: {}", e);
+                            }
+                        }
+                        self.settings_dialog.close();
+                    }
+                    SettingsAction::Apply => {
+                        // Apply changes but keep dialog open
+                        let new_config = self.settings_dialog.get_config().clone();
+                        if let Some(state) = state() {
+                            *state.config.write() = new_config.clone();
+                            if let Err(e) = new_config.save() {
+                                tracing::error!("Failed to save config: {}", e);
+                            }
+                        }
+                        self.settings_dialog.reset_modified();
+                    }
+                    SettingsAction::Cancel => {
+                        // Discard changes and close
+                        self.settings_dialog.close();
+                    }
+                }
+            }
+
+            // Confirm dialog (rendered on top)
+            if let Some(ref mut dialog) = self.confirm_dialog {
+                match dialog.ui(ctx) {
+                    DialogResult::Ok(result) => {
+                        confirm_result = Some(result);
+                        self.confirm_dialog = None;
+                    }
+                    DialogResult::Cancel => {
+                        confirm_result = Some(false);
+                        self.confirm_dialog = None;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Rename dialog
+            if let Some(ref mut dialog) = self.rename_dialog {
+                match dialog.ui(ctx) {
+                    DialogResult::Ok(new_name) => {
+                        rename_result = Some(new_name);
+                        self.rename_dialog = None;
+                    }
+                    DialogResult::Cancel => {
+                        self.rename_dialog = None;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Tag edit dialog
+            if let Some(ref mut dialog) = self.tag_dialog {
+                match dialog.ui(ctx) {
+                    DialogResult::Ok(tags) => {
+                        tag_result = Some(tags);
+                        self.tag_dialog = None;
+                    }
+                    DialogResult::Cancel => {
+                        self.tag_dialog = None;
+                    }
+                    _ => {}
+                }
+            }
         });
 
         // Handle UI actions after egui run
@@ -439,6 +1036,92 @@ impl App {
             self.on_open(idx);
         } else if let Some(idx) = clicked_index {
             self.on_select(idx);
+        }
+
+        // Handle dialog results
+        if let Some(confirmed) = confirm_result {
+            if confirmed {
+                if let Some(path) = self.pending_delete_path.take() {
+                    let _ = self.file_ops.delete(&[path], true);
+                    self.navigate_to(self.current_path.clone());
+                }
+            } else {
+                self.pending_delete_path = None;
+            }
+        }
+
+        if let Some(new_name) = rename_result {
+            if let Some(idx) = self.selected_index {
+                if let Some(entry) = self.file_entries.get(idx) {
+                    let from = entry.path.as_path();
+                    let to = from.with_file_name(new_name);
+                    match self.file_ops.rename(from, &to) {
+                        Ok(_) => {
+                            self.status.message = format!("Renamed to: {}", to.display());
+                            self.navigate_to(self.current_path.clone());
+                        }
+                        Err(e) => {
+                            self.status.message = format!("Rename error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(tags) = tag_result {
+            if let Some(idx) = self.selected_index {
+                if let Some(_entry) = self.file_entries.get(idx) {
+                    // TODO: Save tags to DB
+                    self.status.message = format!("Tags updated: {:?}", tags);
+                }
+            }
+        }
+
+        // Handle viewer input (Doc 4 compliant)
+        if !self.show_browser {
+            // Zoom with scroll wheel
+            if viewer_zoom_delta != 0.0 {
+                let zoom_factor = if viewer_zoom_delta > 0.0 { 1.1 } else { 0.9 };
+                self.image_viewer.zoom = (self.image_viewer.zoom * zoom_factor).clamp(0.1, 10.0);
+            }
+
+            // Pan with drag (1:1 tracking)
+            if viewer_pan_delta != egui::Vec2::ZERO {
+                self.image_viewer.pan += viewer_pan_delta;
+            }
+
+            // Double-click to reset view
+            if viewer_double_clicked {
+                self.image_viewer.reset_view();
+            }
+
+            // Update overlay visibility based on mouse movement
+            if mouse_moved {
+                self.overlay_visible = true;
+                self.last_mouse_move = Some(std::time::Instant::now());
+            } else if let Some(last_move) = self.last_mouse_move {
+                // Hide overlay after 3 seconds of inactivity
+                if last_move.elapsed().as_secs() > 3 {
+                    self.overlay_visible = false;
+                }
+            }
+
+            // Handle seek bar navigation
+            if let Some(position) = seek_bar_clicked {
+                // Jump to image at given position (0.0 - 1.0)
+                let image_indices: Vec<usize> = self.file_entries.iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.is_image())
+                    .map(|(i, _)| i)
+                    .collect();
+                if !image_indices.is_empty() {
+                    let target_idx = ((position * image_indices.len() as f32) as usize)
+                        .min(image_indices.len() - 1);
+                    if let Some(&idx) = image_indices.get(target_idx) {
+                        self.on_select(idx);
+                    }
+                }
+            }
         }
 
         // Handle platform output
@@ -561,8 +1244,18 @@ impl App {
 
                         // File list
                         egui::ScrollArea::vertical().show(ui, |ui| {
+                            // Clone entries to avoid borrow conflicts
+                            let entries = self.file_entries.clone();
+
                             let items: Vec<app_ui::components::file_browser::FileItem> =
-                                self.file_entries.iter().map(|e| {
+                                entries.iter().map(|e| {
+                                    // Load thumbnail for image files
+                                    let thumbnail = if e.is_image() {
+                                        self.load_thumbnail_texture(e)
+                                    } else {
+                                        None
+                                    };
+
                                     app_ui::components::file_browser::FileItem {
                                         name: e.name.clone(),
                                         path: e.path.display().to_string(),
@@ -570,7 +1263,7 @@ impl App {
                                         size: e.size,
                                         modified: e.modified,
                                         extension: e.extension.clone(),
-                                        thumbnail: None,
+                                        thumbnail,
                                     }
                                 }).collect();
 
@@ -589,13 +1282,52 @@ impl App {
 
                 // Preview area
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    self.image_viewer.ui(ui);
+                    let action = self.image_viewer.ui(ui);
+                    self.handle_viewer_action(action);
                 });
             } else {
                 // Full viewer mode
-                self.image_viewer.ui(ui);
+                let action = self.image_viewer.ui(ui);
+                self.handle_viewer_action(action);
             }
         });
+    }
+
+    /// Handle viewer overlay UI actions (Doc 4 spec)
+    fn handle_viewer_action(&mut self, action: ViewerAction) {
+        match action {
+            ViewerAction::None => {}
+            ViewerAction::NextImage => self.next_image(),
+            ViewerAction::PrevImage => self.prev_image(),
+            ViewerAction::FirstImage => self.first_image(),
+            ViewerAction::LastImage => self.last_image(),
+            ViewerAction::ToggleFullscreen => {
+                self.show_browser = !self.show_browser;
+            }
+            ViewerAction::ToggleSlideshow => {
+                self.image_viewer.slideshow_active = !self.image_viewer.slideshow_active;
+                // TODO: Start/stop slideshow timer
+            }
+            ViewerAction::OpenSettings => {
+                self.settings_dialog.open = true;
+            }
+            ViewerAction::Close => {
+                self.show_browser = true;
+            }
+            ViewerAction::SeekTo(position) => {
+                // Seek to position in file list (0.0-1.0)
+                if !self.file_entries.is_empty() {
+                    let target_idx = ((self.file_entries.len() as f32 - 1.0) * position) as usize;
+                    self.on_select(target_idx);
+                    // If it's an image, load it
+                    if let Some(entry) = self.file_entries.get(target_idx).cloned() {
+                        if entry.is_image() {
+                            self.load_image(&entry);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -886,23 +1618,39 @@ impl App {
                 true
             }
             CommandId::VIEW_SMART_SCROLL_DOWN => {
-                // Smart scroll: scroll down, if at bottom edge go to next image
-                let overlap = cmd.params.overlap.unwrap_or(50);
-                // For now, just go to next image if not scrollable
-                if self.image_viewer.zoom <= 1.0 {
-                    self.next_image();
+                // Doc 3 spec: Space = toggle_mark (Browser) / smart_scroll (Viewer)
+                if self.show_browser {
+                    // Browser context: toggle mark on current file
+                    if let Some(idx) = self.selected_index {
+                        if let Some(entry) = self.file_entries.get(idx) {
+                            let hash = entry.path.id();
+                            if self.marked_files.contains(&hash) {
+                                self.marked_files.remove(&hash);
+                                self.status.message = format!("Unmarked: {}", entry.name);
+                            } else {
+                                self.marked_files.insert(hash);
+                                self.status.message = format!("Marked: {} ({} total)", entry.name, self.marked_files.len());
+                            }
+                        }
+                    }
                 } else {
-                    // Would scroll, but for simplicity just notify
-                    self.status.message = format!("Smart scroll down (overlap: {}px)", overlap);
+                    // Viewer context: smart scroll (Doc 4 spec)
+                    let overlap = cmd.params.overlap.unwrap_or(50) as f32;
+                    let available = self.image_viewer.get_estimated_available();
+                    if self.image_viewer.smart_scroll_down(available, overlap) {
+                        // At bottom edge or image fits, go to next image
+                        self.next_image();
+                    }
                 }
                 true
             }
             CommandId::VIEW_SMART_SCROLL_UP => {
-                let overlap = cmd.params.overlap.unwrap_or(50);
-                if self.image_viewer.zoom <= 1.0 {
+                // Viewer context: smart scroll up (Doc 4 spec)
+                let overlap = cmd.params.overlap.unwrap_or(50) as f32;
+                let available = self.image_viewer.get_estimated_available();
+                if self.image_viewer.smart_scroll_up(available, overlap) {
+                    // At top edge or image fits, go to prev image
                     self.prev_image();
-                } else {
-                    self.status.message = format!("Smart scroll up (overlap: {}px)", overlap);
                 }
                 true
             }
@@ -1076,22 +1824,38 @@ impl App {
             CommandId::FILE_COPY | CommandId::FILE_CUT => {
                 if let Some(idx) = self.selected_index {
                     if let Some(entry) = self.file_entries.get(idx) {
-                        let path = entry.path.to_string();
-                        // Use arboard for clipboard
-                        #[cfg(feature = "clipboard")]
-                        {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let _ = clipboard.set_text(&path);
+                        let mode = if cmd_id == CommandId::FILE_CUT {
+                            ClipboardMode::Cut
+                        } else {
+                            ClipboardMode::Copy
+                        };
+
+                        let paths = vec![entry.path.as_path().to_path_buf()];
+                        match self.file_ops.copy_to_clipboard(&paths, mode) {
+                            Ok(_) => {
+                                let action = if cmd_id == CommandId::FILE_CUT { "Cut" } else { "Copied" };
+                                self.status.message = format!("{}: {}", action, entry.name);
+                            }
+                            Err(e) => {
+                                self.status.message = format!("Clipboard error: {}", e);
                             }
                         }
-                        let action = if cmd_id == CommandId::FILE_CUT { "Cut" } else { "Copied" };
-                        self.status.message = format!("{}: {}", action, entry.name);
                     }
                 }
                 true
             }
             CommandId::FILE_PASTE => {
-                self.status.message = "Paste (not yet implemented)".to_string();
+                let cut = false; // Will be determined from clipboard mode
+                match self.file_ops.paste_from_clipboard(self.current_path.as_path(), cut) {
+                    Ok(pasted) => {
+                        self.status.message = format!("Pasted {} file(s)", pasted.len());
+                        // Refresh directory
+                        self.navigate_to(self.current_path.clone());
+                    }
+                    Err(e) => {
+                        self.status.message = format!("Paste error: {}", e);
+                    }
+                }
                 true
             }
             CommandId::FILE_COPY_IMAGE => {
@@ -1126,35 +1890,26 @@ impl App {
                     if let Some(entry) = self.file_entries.get(idx) {
                         let use_trash = cmd.params.trash.unwrap_or(true);
                         let confirm = cmd.params.confirm.unwrap_or(true);
+
                         if confirm {
-                            self.status.message = format!("Delete {} (confirm required)", entry.name);
+                            // ダイアログ表示
+                            self.pending_delete_path = Some(entry.path.as_path().to_path_buf());
+                            self.confirm_dialog = Some(ConfirmDialog::new_delete(
+                                &entry.name,
+                                use_trash
+                            ));
                         } else {
-                            if use_trash {
-                                #[cfg(feature = "trash")]
-                                {
-                                    match trash::delete(&entry.path.as_path()) {
-                                        Ok(_) => {
-                                            self.status.message = format!("Moved to trash: {}", entry.name);
-                                            self.navigate_to(self.current_path.clone());
-                                        }
-                                        Err(e) => {
-                                            self.status.message = format!("Error: {}", e);
-                                        }
-                                    }
+                            // 即削除
+                            let paths = vec![entry.path.as_path().to_path_buf()];
+                            match self.file_ops.delete(&paths, use_trash) {
+                                Ok(_) => {
+                                    let action = if use_trash { "Moved to trash" } else { "Deleted" };
+                                    self.status.message = format!("{}: {}", action, entry.name);
+                                    // Refresh directory
+                                    self.navigate_to(self.current_path.clone());
                                 }
-                                #[cfg(not(feature = "trash"))]
-                                {
-                                    self.status.message = "Trash feature not enabled".to_string();
-                                }
-                            } else {
-                                match std::fs::remove_file(&entry.path.as_path()) {
-                                    Ok(_) => {
-                                        self.status.message = format!("Deleted: {}", entry.name);
-                                        self.navigate_to(self.current_path.clone());
-                                    }
-                                    Err(e) => {
-                                        self.status.message = format!("Error: {}", e);
-                                    }
+                                Err(e) => {
+                                    self.status.message = format!("Delete error: {}", e);
                                 }
                             }
                         }
@@ -1165,56 +1920,75 @@ impl App {
             CommandId::FILE_RENAME => {
                 if let Some(idx) = self.selected_index {
                     if let Some(entry) = self.file_entries.get(idx) {
-                        self.status.message = format!("Rename: {} (dialog required)", entry.name);
+                        // Show rename dialog
+                        self.rename_dialog = Some(RenameDialog::new(&entry.name));
                     }
                 }
                 true
             }
             CommandId::FILE_CREATE_DIR => {
-                self.status.message = "Create directory (dialog required)".to_string();
+                // TODO: Show dialog to get directory name
+                self.status.message = "Create directory (dialog required - not yet implemented)".to_string();
+
+                // Example usage (would be called after dialog):
+                // let new_dir = self.current_path.as_path().join("NewFolder");
+                // match self.file_ops.create_dir(&new_dir) {
+                //     Ok(_) => { self.navigate_to(self.current_path.clone()); }
+                //     Err(e) => { self.status.message = format!("Create dir error: {}", e); }
+                // }
                 true
             }
             CommandId::FILE_COPY_TO | CommandId::FILE_MOVE_TO => {
-                if let Some(target) = &cmd.params.target {
+                if let Some(target_str) = &cmd.params.target {
                     if let Some(idx) = self.selected_index {
                         if let Some(entry) = self.file_entries.get(idx) {
-                            let action = if cmd_id == CommandId::FILE_MOVE_TO { "Move" } else { "Copy" };
-                            self.status.message = format!("{} {} to {}", action, entry.name, target);
+                            let target_dir = PathBuf::from(target_str);
+                            let sources = vec![entry.path.as_path().to_path_buf()];
+
+                            let result = if cmd_id == CommandId::FILE_MOVE_TO {
+                                self.file_ops.move_to(&sources, &target_dir)
+                            } else {
+                                self.file_ops.copy_to(&sources, &target_dir)
+                            };
+
+                            match result {
+                                Ok(files) => {
+                                    let action = if cmd_id == CommandId::FILE_MOVE_TO { "Moved" } else { "Copied" };
+                                    self.status.message = format!("{} {} to {}", action, entry.name, target_str);
+                                    // Refresh if moved
+                                    if cmd_id == CommandId::FILE_MOVE_TO {
+                                        self.navigate_to(self.current_path.clone());
+                                    }
+                                }
+                                Err(e) => {
+                                    self.status.message = format!("File operation error: {}", e);
+                                }
+                            }
                         }
                     }
                 } else {
-                    self.status.message = "Target path required".to_string();
+                    // TODO: Show dialog to select target directory
+                    self.status.message = "Target path required (dialog not yet implemented)".to_string();
                 }
                 true
             }
             CommandId::FILE_OPEN_EXPLORER => {
+                let select = cmd.params.select.unwrap_or(true);
                 let path = if let Some(idx) = self.selected_index {
-                    self.file_entries.get(idx).map(|e| e.path.to_string())
+                    self.file_entries.get(idx).map(|e| e.path.as_path().to_path_buf())
                 } else {
-                    Some(self.current_path.to_string())
+                    Some(self.current_path.as_path().to_path_buf())
                 };
-                if let Some(path) = path {
-                    #[cfg(target_os = "windows")]
-                    {
-                        let _ = std::process::Command::new("explorer")
-                            .arg("/select,")
-                            .arg(&path)
-                            .spawn();
+
+                if let Some(path_buf) = path {
+                    match self.file_ops.open_in_explorer(&path_buf, select) {
+                        Ok(_) => {
+                            self.status.message = "Opened in file explorer".to_string();
+                        }
+                        Err(e) => {
+                            self.status.message = format!("Open explorer error: {}", e);
+                        }
                     }
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = std::process::Command::new("open")
-                            .arg("-R")
-                            .arg(&path)
-                            .spawn();
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new(&path)))
-                            .spawn();
-                    }
-                    self.status.message = "Opened in file explorer".to_string();
                 }
                 true
             }
@@ -1222,7 +1996,15 @@ impl App {
                 if let Some(app_id) = &cmd.params.app_id {
                     if let Some(idx) = self.selected_index {
                         if let Some(entry) = self.file_entries.get(idx) {
-                            self.status.message = format!("Open {} with {}", entry.name, app_id);
+                            let args = cmd.params.args.as_deref();
+                            match self.file_ops.open_with(entry.path.as_path(), app_id, args) {
+                                Ok(_) => {
+                                    self.status.message = format!("Opened {} with {}", entry.name, app_id);
+                                }
+                                Err(e) => {
+                                    self.status.message = format!("Open with error: {}", e);
+                                }
+                            }
                         }
                     }
                 }
@@ -1231,8 +2013,14 @@ impl App {
             CommandId::FILE_OPEN_EXTERNAL => {
                 if let Some(idx) = self.selected_index {
                     if let Some(entry) = self.file_entries.get(idx) {
-                        let _ = open::that(entry.path.as_path());
-                        self.status.message = format!("Opened: {}", entry.name);
+                        match self.file_ops.open_external(entry.path.as_path()) {
+                            Ok(_) => {
+                                self.status.message = format!("Opened: {}", entry.name);
+                            }
+                            Err(e) => {
+                                self.status.message = format!("Open external error: {}", e);
+                            }
+                        }
                     }
                 }
                 true
@@ -1389,7 +2177,14 @@ impl App {
                 true
             }
             CommandId::META_EDIT_TAGS => {
-                self.status.message = "Edit tags (dialog required)".to_string();
+                if let Some(idx) = self.selected_index {
+                    if let Some(entry) = self.file_entries.get(idx) {
+                        // TODO: Load current tags from DB and all available tags
+                        let current_tags = Vec::new();  // Placeholder
+                        let all_tags = Vec::new();      // Placeholder
+                        self.tag_dialog = Some(TagEditDialog::new(current_tags, all_tags));
+                    }
+                }
                 true
             }
             CommandId::META_COPY_META => {
@@ -1409,15 +2204,24 @@ impl App {
             CommandId::META_TOGGLE_MARK => {
                 if let Some(idx) = self.selected_index {
                     if let Some(entry) = self.file_entries.get(idx) {
-                        // TODO: Toggle mark state in app state
-                        self.status.message = format!("Toggled mark: {}", entry.name);
+                        let hash = entry.path.id();
+                        if self.marked_files.contains(&hash) {
+                            self.marked_files.remove(&hash);
+                            self.status.message = format!("Unmarked: {}", entry.name);
+                        } else {
+                            self.marked_files.insert(hash);
+                            self.status.message = format!("Marked: {} ({} total)", entry.name, self.marked_files.len());
+                        }
                     }
                 }
                 true
             }
             CommandId::META_SELECT_MARKED => {
-                // TODO: Select all marked files
-                self.status.message = "Select marked files".to_string();
+                // Select all marked files in current folder
+                let marked_count = self.file_entries.iter()
+                    .filter(|e| self.marked_files.contains(&e.path.id()))
+                    .count();
+                self.status.message = format!("{} marked files in current folder", marked_count);
                 true
             }
 
@@ -1430,7 +2234,9 @@ impl App {
                 true
             }
             CommandId::APP_OPEN_SETTINGS => {
-                self.status.message = "Settings (dialog required)".to_string();
+                let config = state().map(|s| s.config.read().clone()).unwrap_or_default();
+                self.settings_dialog.open(config, None);
+                self.status.message = "Opening settings...".to_string();
                 true
             }
             CommandId::APP_OPEN_MANUAL => {
@@ -1550,6 +2356,100 @@ impl App {
             self.grid_columns = columns;
             self.grid_visible_rows = visible_rows;
             self.nav_state.update_grid_layout(columns, visible_rows);
+        }
+    }
+
+    /// Handle file system events from watcher
+    fn handle_fs_event(&mut self, event: FsEvent) {
+        match event {
+            FsEvent::Created(path) => {
+                tracing::info!("File created: {}", path.display());
+                // Refresh directory list
+                self.refresh_current_directory();
+
+                // DB registration
+                if let Some(ref db) = self.metadata_db {
+                    let upath = UniversalPath::new(&path);
+                    let size = path.metadata().map(|m| m.len() as i64).ok();
+                    let modified = path.metadata().ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64);
+                    let _ = db.upsert_file(&upath, size, modified);
+                }
+            }
+            FsEvent::Removed(path) => {
+                tracing::info!("File removed: {}", path.display());
+                self.refresh_current_directory();
+
+                // DB deletion
+                if let Some(ref db) = self.metadata_db {
+                    let upath = UniversalPath::new(&path);
+                    let _ = db.delete_file(upath.id());
+                }
+
+                // Thumbnail cache deletion
+                if let Some(ref cache) = self.thumbnail_cache {
+                    let upath = UniversalPath::new(&path);
+                    let _ = cache.delete_by_hash(upath.id());
+                }
+            }
+            FsEvent::Modified(path) => {
+                tracing::debug!("File modified: {}", path.display());
+                // Reload if currently displayed image was modified
+                if let Some(idx) = self.selected_index {
+                    if let Some(entry) = self.file_entries.get(idx) {
+                        if entry.path.as_path() == path {
+                            // Currently displayed image was modified
+                            self.load_image(&entry.clone());
+                        }
+                    }
+                }
+            }
+            FsEvent::Renamed { from, to } => {
+                tracing::info!("File renamed: {} -> {}", from.display(), to.display());
+                self.refresh_current_directory();
+
+                // DB: delete old + insert new (since rename_file doesn't exist yet)
+                if let Some(ref db) = self.metadata_db {
+                    let old_upath = UniversalPath::new(&from);
+                    let _ = db.delete_file(old_upath.id());
+
+                    let new_upath = UniversalPath::new(&to);
+                    let size = to.metadata().map(|m| m.len() as i64).ok();
+                    let modified = to.metadata().ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64);
+                    let _ = db.upsert_file(&new_upath, size, modified);
+                }
+
+                // Thumbnail cache: delete old + new will be generated on demand
+                if let Some(ref cache) = self.thumbnail_cache {
+                    let old_upath = UniversalPath::new(&from);
+                    let _ = cache.delete_by_hash(old_upath.id());
+                }
+            }
+        }
+    }
+
+    /// Refresh current directory while preserving selection
+    fn refresh_current_directory(&mut self) {
+        if let Ok(entries) = list_directory(self.current_path.as_path(), &ListOptions::default()) {
+            // Preserve selected path
+            let selected_path = self.selected_index
+                .and_then(|i| self.file_entries.get(i))
+                .map(|e| e.path.clone());
+
+            self.file_entries = entries;
+
+            // Restore selection
+            if let Some(path) = selected_path {
+                self.selected_index = self.file_entries.iter()
+                    .position(|e| e.path.id() == path.id());
+            }
+
+            self.status.message = format!("{} items", self.file_entries.len());
         }
     }
 }
@@ -1745,6 +2645,14 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // File watcher event processing
+        if let Some(ref watcher) = self.file_watcher {
+            let events = watcher.poll_events();
+            for event in events {
+                self.handle_fs_event(event);
+            }
+        }
+
         if let Some(window) = &self.window {
             window.request_redraw();
         }

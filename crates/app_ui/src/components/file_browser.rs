@@ -55,6 +55,90 @@ impl FileBrowser {
         let item_width = self.thumbnail_size + 16.0;
         let columns = (available_width / item_width).max(1.0) as usize;
 
+        // Handle keyboard navigation
+        if !items.is_empty() {
+            let input = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::ArrowRight),
+                    i.key_pressed(egui::Key::PageUp),
+                    i.key_pressed(egui::Key::PageDown),
+                    i.key_pressed(egui::Key::Home),
+                    i.key_pressed(egui::Key::End),
+                )
+            });
+
+            let current = self.selected.unwrap_or(0);
+            let rows = (items.len() + columns - 1) / columns;
+
+            let new_selected = if input.0 {
+                // Up
+                if current >= columns {
+                    Some(current - columns)
+                } else {
+                    Some(current)
+                }
+            } else if input.1 {
+                // Down
+                let next = current + columns;
+                if next < items.len() {
+                    Some(next)
+                } else {
+                    Some(current)
+                }
+            } else if input.2 {
+                // Left
+                if current > 0 {
+                    Some(current - 1)
+                } else {
+                    Some(current)
+                }
+            } else if input.3 {
+                // Right
+                if current + 1 < items.len() {
+                    Some(current + 1)
+                } else {
+                    Some(current)
+                }
+            } else if input.4 {
+                // PageUp (move up by visible rows, estimate ~5 rows)
+                let page_rows = 5;
+                let jump = page_rows * columns;
+                if current >= jump {
+                    Some(current - jump)
+                } else {
+                    Some(0)
+                }
+            } else if input.5 {
+                // PageDown (move down by visible rows)
+                let page_rows = 5;
+                let jump = page_rows * columns;
+                let next = current + jump;
+                if next < items.len() {
+                    Some(next)
+                } else {
+                    Some(items.len() - 1)
+                }
+            } else if input.6 {
+                // Home
+                Some(0)
+            } else if input.7 {
+                // End
+                Some(items.len() - 1)
+            } else {
+                None
+            };
+
+            if let Some(new_idx) = new_selected {
+                if new_idx != current || self.selected.is_none() {
+                    self.selected = Some(new_idx);
+                    action = Some(BrowserAction::Select(new_idx));
+                }
+            }
+        }
+
         egui::Grid::new("file_grid")
             .num_columns(columns)
             .spacing(Vec2::splat(8.0))
@@ -99,26 +183,45 @@ impl FileBrowser {
                 );
             }
 
-            // Placeholder for thumbnail
-            ui.painter().rect_filled(
-                rect,
-                4.0,
-                if item.is_dir {
-                    egui::Color32::from_rgb(100, 140, 180)
-                } else {
-                    egui::Color32::from_rgb(80, 80, 80)
-                },
-            );
-
-            // Icon for folders
-            if item.is_dir {
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "📁",
-                    egui::FontId::proportional(32.0),
-                    egui::Color32::WHITE,
+            // Draw thumbnail or placeholder
+            if let Some(texture_id) = item.thumbnail {
+                // Draw actual thumbnail
+                let uv = egui::Rect::from_min_max(
+                    egui::Pos2::ZERO,
+                    egui::Pos2::new(1.0, 1.0),
                 );
+                ui.painter().image(texture_id, rect, uv, egui::Color32::WHITE);
+            } else {
+                // Placeholder for thumbnail
+                ui.painter().rect_filled(
+                    rect,
+                    4.0,
+                    if item.is_dir {
+                        egui::Color32::from_rgb(100, 140, 180)
+                    } else {
+                        egui::Color32::from_rgb(80, 80, 80)
+                    },
+                );
+
+                // Icon for folders
+                if item.is_dir {
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "📁",
+                        egui::FontId::proportional(32.0),
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    // Loading indicator for images without thumbnail
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "...",
+                        egui::FontId::proportional(24.0),
+                        egui::Color32::GRAY,
+                    );
+                }
             }
 
             // File name (truncated)
@@ -139,6 +242,70 @@ impl FileBrowser {
 
     fn render_list(&mut self, ui: &mut Ui, items: &[FileItem]) -> Option<BrowserAction> {
         let mut action = None;
+
+        // Handle keyboard navigation
+        if !items.is_empty() {
+            let input = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::PageUp),
+                    i.key_pressed(egui::Key::PageDown),
+                    i.key_pressed(egui::Key::Home),
+                    i.key_pressed(egui::Key::End),
+                )
+            });
+
+            let current = self.selected.unwrap_or(0);
+
+            let new_selected = if input.0 {
+                // Up
+                if current > 0 {
+                    Some(current - 1)
+                } else {
+                    Some(current)
+                }
+            } else if input.1 {
+                // Down
+                if current + 1 < items.len() {
+                    Some(current + 1)
+                } else {
+                    Some(current)
+                }
+            } else if input.2 {
+                // PageUp
+                let jump = 10;
+                if current >= jump {
+                    Some(current - jump)
+                } else {
+                    Some(0)
+                }
+            } else if input.3 {
+                // PageDown
+                let jump = 10;
+                let next = current + jump;
+                if next < items.len() {
+                    Some(next)
+                } else {
+                    Some(items.len() - 1)
+                }
+            } else if input.4 {
+                // Home
+                Some(0)
+            } else if input.5 {
+                // End
+                Some(items.len() - 1)
+            } else {
+                None
+            };
+
+            if let Some(new_idx) = new_selected {
+                if new_idx != current || self.selected.is_none() {
+                    self.selected = Some(new_idx);
+                    action = Some(BrowserAction::Select(new_idx));
+                }
+            }
+        }
 
         for (idx, item) in items.iter().enumerate() {
             let is_selected = self.selected == Some(idx);
@@ -173,6 +340,70 @@ impl FileBrowser {
 
     fn render_details(&mut self, ui: &mut Ui, items: &[FileItem]) -> Option<BrowserAction> {
         let mut action = None;
+
+        // Handle keyboard navigation
+        if !items.is_empty() {
+            let input = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::PageUp),
+                    i.key_pressed(egui::Key::PageDown),
+                    i.key_pressed(egui::Key::Home),
+                    i.key_pressed(egui::Key::End),
+                )
+            });
+
+            let current = self.selected.unwrap_or(0);
+
+            let new_selected = if input.0 {
+                // Up
+                if current > 0 {
+                    Some(current - 1)
+                } else {
+                    Some(current)
+                }
+            } else if input.1 {
+                // Down
+                if current + 1 < items.len() {
+                    Some(current + 1)
+                } else {
+                    Some(current)
+                }
+            } else if input.2 {
+                // PageUp
+                let jump = 10;
+                if current >= jump {
+                    Some(current - jump)
+                } else {
+                    Some(0)
+                }
+            } else if input.3 {
+                // PageDown
+                let jump = 10;
+                let next = current + jump;
+                if next < items.len() {
+                    Some(next)
+                } else {
+                    Some(items.len() - 1)
+                }
+            } else if input.4 {
+                // Home
+                Some(0)
+            } else if input.5 {
+                // End
+                Some(items.len() - 1)
+            } else {
+                None
+            };
+
+            if let Some(new_idx) = new_selected {
+                if new_idx != current || self.selected.is_none() {
+                    self.selected = Some(new_idx);
+                    action = Some(BrowserAction::Select(new_idx));
+                }
+            }
+        }
 
         egui::Grid::new("details_grid")
             .num_columns(4)
