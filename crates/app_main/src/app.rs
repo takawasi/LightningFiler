@@ -974,7 +974,13 @@ impl App {
             }
 
             // Central panel - File browser or viewer
-            egui::CentralPanel::default().show(ctx, |ui| {
+            // Viewer mode: no margins/frame for true fullscreen
+            let central_frame = if show_browser {
+                egui::Frame::central_panel(&ctx.style())
+            } else {
+                egui::Frame::none().fill(egui::Color32::BLACK)
+            };
+            egui::CentralPanel::default().frame(central_frame).show(ctx, |ui| {
                 if show_browser {
                     // Left panel - Folder Tree (folders only)
                     egui::SidePanel::left("folder_tree_panel")
@@ -1007,104 +1013,17 @@ impl App {
                         }
                     });
                 } else {
-                    // Image viewer mode - Doc 4 compliant
+                    // Image viewer mode - TRUE fullscreen, no margins
                     let available = ui.available_rect_before_wrap();
-                    let seek_bar_height = 32.0;
-                    let _top_bar_height = 36.0;
 
-                    // Draw dark background
+                    // Draw black background (edge to edge)
                     ui.painter().rect_filled(
                         available,
                         0.0,
-                        egui::Color32::from_rgb(32, 32, 32),
+                        egui::Color32::BLACK,
                     );
 
-                    // Define seek bar rect for hover detection
-                    let seek_bar = egui::Rect::from_min_size(
-                        egui::Pos2::new(available.left(), available.bottom() - seek_bar_height),
-                        egui::Vec2::new(available.width(), seek_bar_height),
-                    );
-
-                    // Check if mouse is near seek bar area (with larger detection zone)
-                    let hover_zone = egui::Rect::from_min_size(
-                        egui::Pos2::new(available.left(), available.bottom() - seek_bar_height - 20.0),
-                        egui::Vec2::new(available.width(), seek_bar_height + 20.0),
-                    );
-                    let seek_bar_hovered = ui.input(|i| {
-                        i.pointer.hover_pos()
-                            .map(|pos| hover_zone.contains(pos))
-                            .unwrap_or(false)
-                    });
-
-                    // Calculate seek bar opacity: hover = full, overlay_visible = half, hidden = 0
-                    let seek_bar_opacity = if seek_bar_hovered {
-                        220 // Nearly opaque when hovered
-                    } else if overlay_visible {
-                        100 // Semi-transparent when visible
-                    } else {
-                        0 // Hidden
-                    };
-
-                    // Only render seek bar if visible
-                    if seek_bar_opacity > 0 {
-                        let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, seek_bar_opacity);
-                        ui.painter().rect_filled(seek_bar, 4.0, overlay_bg);
-
-                        // Draw seek bar track
-                        let track_margin = 40.0;
-                        let track_rect = egui::Rect::from_min_max(
-                            egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
-                            egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
-                        );
-                        let track_color = egui::Color32::from_rgba_unmultiplied(80, 80, 80, seek_bar_opacity);
-                        ui.painter().rect_filled(track_rect, 2.0, track_color);
-
-                        // Draw position indicator and counter
-                        if image_count > 0 {
-                            let progress = current_image_pos as f32 / image_count as f32;
-                            let indicator_x = track_rect.left() + track_rect.width() * progress;
-
-                            // Filled portion
-                            let filled_rect = egui::Rect::from_min_max(
-                                track_rect.left_top(),
-                                egui::Pos2::new(indicator_x, track_rect.bottom()),
-                            );
-                            let fill_color = egui::Color32::from_rgba_unmultiplied(100, 150, 255, seek_bar_opacity);
-                            ui.painter().rect_filled(filled_rect, 2.0, fill_color);
-
-                            // Position indicator
-                            let indicator_pos = egui::Pos2::new(indicator_x, seek_bar.center().y);
-                            let indicator_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, seek_bar_opacity);
-                            ui.painter().circle_filled(indicator_pos, 8.0, indicator_color);
-
-                            // Item counter at right side
-                            let counter_text = format!("{} / {}", current_image_pos, image_count);
-                            let text_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, seek_bar_opacity);
-                            ui.painter().text(
-                                egui::Pos2::new(seek_bar.right() - 10.0, seek_bar.center().y),
-                                egui::Align2::RIGHT_CENTER,
-                                counter_text,
-                                egui::FontId::proportional(14.0),
-                                text_color,
-                            );
-                        }
-                    }
-
-                    // Allocate seek bar for click (always - for interaction even when nearly invisible)
-                    let seek_response = ui.allocate_rect(seek_bar, egui::Sense::click_and_drag());
-                    if seek_response.clicked() || seek_response.dragged() {
-                        let track_margin = 40.0;
-                        let track_rect = egui::Rect::from_min_max(
-                            egui::Pos2::new(seek_bar.left() + track_margin, seek_bar.center().y - 2.0),
-                            egui::Pos2::new(seek_bar.right() - track_margin, seek_bar.center().y + 2.0),
-                        );
-                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                            let relative_x = (pos.x - track_rect.left()) / track_rect.width();
-                            seek_bar_clicked = Some(relative_x.clamp(0.0, 1.0));
-                        }
-                    }
-
-                    // === IMAGE AREA (full screen - seek bar overlays) ===
+                    // === IMAGE AREA (full available space) ===
                     let image_area = available;
 
                     // Allocate image area for pan/zoom (AFTER seek bar)
@@ -1141,7 +1060,7 @@ impl App {
 
                     // Render image if texture exists
                     if let Some(texture_id) = viewer_texture {
-                        // Calculate display size based on fit mode
+                        // Calculate display size based on fit mode (allow scale up for fit)
                         let rotated_size = if viewer_rotation == 90 || viewer_rotation == 270 {
                             egui::Vec2::new(viewer_image_size.y, viewer_image_size.x)
                         } else {
@@ -1150,9 +1069,10 @@ impl App {
 
                         let base_scale = match viewer_fit_mode {
                             app_ui::components::viewer::FitMode::FitToWindow => {
+                                // Scale to fit window (allow scale up)
                                 let scale_x = available.width() / rotated_size.x;
                                 let scale_y = available.height() / rotated_size.y;
-                                scale_x.min(scale_y).min(1.0)
+                                scale_x.min(scale_y) // Removed .min(1.0) to allow scaling up
                             }
                             app_ui::components::viewer::FitMode::FitWidth => {
                                 available.width() / rotated_size.x
@@ -1167,101 +1087,140 @@ impl App {
                         let center = available.center() + viewer_pan;
                         let image_rect = egui::Rect::from_center_size(center, display_size);
 
-                        // Draw image
+                        // Draw image (edge to edge)
                         let uv = egui::Rect::from_min_max(
                             egui::Pos2::ZERO,
                             egui::Pos2::new(1.0, 1.0),
                         );
                         ui.painter().image(texture_id, image_rect, uv, egui::Color32::WHITE);
 
-                        // Check mouse activity for overlay visibility
-                        if ui.input(|i| i.pointer.delta().length() > 0.0) {
-                            mouse_moved = true;
-                        }
+                        // === OVERLAY UI (drawn AFTER image, so appears on top) ===
 
-                        // Draw overlay UI (Doc 4 spec) when visible
-                        if overlay_visible {
-                            let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180);
-                            let overlay_height = 36.0;
+                        // Check hover zones for overlay opacity
+                        let seek_bar_height = 32.0;
+                        let top_bar_height = 36.0;
+                        let seek_bar_rect = egui::Rect::from_min_size(
+                            egui::Pos2::new(available.left(), available.bottom() - seek_bar_height),
+                            egui::Vec2::new(available.width(), seek_bar_height),
+                        );
+                        let top_bar_rect = egui::Rect::from_min_size(
+                            available.left_top(),
+                            egui::Vec2::new(available.width(), top_bar_height),
+                        );
 
-                            // === Top Control Bar ===
-                            let top_bar = egui::Rect::from_min_size(
-                                available.left_top(),
-                                egui::Vec2::new(available.width(), overlay_height),
-                            );
-                            ui.painter().rect_filled(top_bar, 0.0, overlay_bg);
+                        let hover_pos = ui.input(|i| i.pointer.hover_pos());
+                        let seek_bar_hovered = hover_pos.map(|p| seek_bar_rect.expand(20.0).contains(p)).unwrap_or(false);
+                        let top_bar_hovered = hover_pos.map(|p| top_bar_rect.expand(20.0).contains(p)).unwrap_or(false);
 
-                            // Left: File info
+                        // Calculate opacity
+                        let overlay_opacity = if seek_bar_hovered || top_bar_hovered {
+                            220u8
+                        } else if overlay_visible {
+                            140u8
+                        } else {
+                            0u8
+                        };
+
+                        if overlay_opacity > 0 {
+                            let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, overlay_opacity);
+
+                            // === Top Control Bar (on top of image) ===
+                            ui.painter().rect_filled(top_bar_rect, 0.0, overlay_bg);
+
+                            // Left: File info with items count
                             if let Some(idx) = selected_index {
                                 if let Some(entry) = entries.get(idx) {
                                     let info_text = format!(
-                                        "{} - {}×{}",
+                                        "{} - {}×{} ({} items)",
                                         entry.name,
                                         viewer_image_size.x as u32,
                                         viewer_image_size.y as u32,
+                                        image_count,
                                     );
                                     ui.painter().text(
-                                        top_bar.left_center() + egui::Vec2::new(10.0, 0.0),
+                                        top_bar_rect.left_center() + egui::Vec2::new(10.0, 0.0),
                                         egui::Align2::LEFT_CENTER,
                                         &info_text,
-                                        egui::FontId::proportional(14.0),
+                                        egui::FontId::proportional(13.0),
                                         egui::Color32::WHITE,
                                     );
                                 }
                             }
 
-                            // Center: Navigation controls
+                            // Center: Position indicator
                             let nav_text = format!("{} / {}", current_image_pos, image_count);
                             ui.painter().text(
-                                top_bar.center(),
+                                top_bar_rect.center(),
                                 egui::Align2::CENTER_CENTER,
                                 &nav_text,
                                 egui::FontId::proportional(14.0),
                                 egui::Color32::WHITE,
                             );
 
-                            // Navigation buttons (simple text for now)
-                            let nav_left = top_bar.center() - egui::Vec2::new(80.0, 0.0);
-                            let nav_right = top_bar.center() + egui::Vec2::new(80.0, 0.0);
-                            ui.painter().text(
-                                nav_left - egui::Vec2::new(30.0, 0.0),
-                                egui::Align2::CENTER_CENTER,
-                                "<<",
-                                egui::FontId::proportional(14.0),
-                                egui::Color32::GRAY,
-                            );
-                            ui.painter().text(
-                                nav_left,
-                                egui::Align2::CENTER_CENTER,
-                                "<",
-                                egui::FontId::proportional(16.0),
-                                egui::Color32::WHITE,
-                            );
-                            ui.painter().text(
-                                nav_right,
-                                egui::Align2::CENTER_CENTER,
-                                ">",
-                                egui::FontId::proportional(16.0),
-                                egui::Color32::WHITE,
-                            );
-                            ui.painter().text(
-                                nav_right + egui::Vec2::new(30.0, 0.0),
-                                egui::Align2::CENTER_CENTER,
-                                ">>",
-                                egui::FontId::proportional(14.0),
-                                egui::Color32::GRAY,
-                            );
-
                             // Right: Zoom info
                             let zoom_text = format!("{:.0}%", viewer_zoom * base_scale * 100.0);
                             ui.painter().text(
-                                top_bar.right_center() - egui::Vec2::new(10.0, 0.0),
+                                top_bar_rect.right_center() - egui::Vec2::new(10.0, 0.0),
                                 egui::Align2::RIGHT_CENTER,
                                 &zoom_text,
                                 egui::FontId::proportional(14.0),
                                 egui::Color32::WHITE,
                             );
-                            // Note: Seek bar is now drawn before image area (always visible)
+
+                            // === Seek Bar (on top of image, at bottom) ===
+                            ui.painter().rect_filled(seek_bar_rect, 0.0, overlay_bg);
+
+                            // Draw seek bar track
+                            let track_margin = 40.0;
+                            let track_rect = egui::Rect::from_min_max(
+                                egui::Pos2::new(seek_bar_rect.left() + track_margin, seek_bar_rect.center().y - 2.0),
+                                egui::Pos2::new(seek_bar_rect.right() - track_margin - 80.0, seek_bar_rect.center().y + 2.0),
+                            );
+                            let track_color = egui::Color32::from_rgba_unmultiplied(80, 80, 80, overlay_opacity);
+                            ui.painter().rect_filled(track_rect, 2.0, track_color);
+
+                            // Draw position indicator
+                            if image_count > 0 {
+                                let progress = current_image_pos as f32 / image_count as f32;
+                                let indicator_x = track_rect.left() + track_rect.width() * progress;
+
+                                // Filled portion
+                                let filled_rect = egui::Rect::from_min_max(
+                                    track_rect.left_top(),
+                                    egui::Pos2::new(indicator_x, track_rect.bottom()),
+                                );
+                                let fill_color = egui::Color32::from_rgba_unmultiplied(100, 150, 255, overlay_opacity);
+                                ui.painter().rect_filled(filled_rect, 2.0, fill_color);
+
+                                // Position indicator circle
+                                let indicator_pos = egui::Pos2::new(indicator_x, seek_bar_rect.center().y);
+                                let indicator_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, overlay_opacity);
+                                ui.painter().circle_filled(indicator_pos, 8.0, indicator_color);
+                            }
+
+                            // Item counter at right side of seek bar
+                            let counter_text = format!("{} / {}", current_image_pos, image_count);
+                            let text_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, overlay_opacity);
+                            ui.painter().text(
+                                egui::Pos2::new(seek_bar_rect.right() - 10.0, seek_bar_rect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                counter_text,
+                                egui::FontId::proportional(14.0),
+                                text_color,
+                            );
+                        }
+
+                        // Handle seek bar clicks
+                        let track_margin = 40.0;
+                        let track_rect = egui::Rect::from_min_max(
+                            egui::Pos2::new(seek_bar_rect.left() + track_margin, seek_bar_rect.center().y - 10.0),
+                            egui::Pos2::new(seek_bar_rect.right() - track_margin - 80.0, seek_bar_rect.center().y + 10.0),
+                        );
+                        if let Some(pos) = hover_pos {
+                            if seek_bar_rect.contains(pos) && ui.input(|i| i.pointer.primary_clicked() || i.pointer.primary_down()) {
+                                let relative_x = (pos.x - track_rect.left()) / track_rect.width();
+                                seek_bar_clicked = Some(relative_x.clamp(0.0, 1.0));
+                            }
                         }
                     } else {
                         // No image placeholder
@@ -1452,6 +1411,68 @@ impl App {
             // Pan with drag (1:1 tracking)
             if viewer_pan_delta != egui::Vec2::ZERO {
                 self.image_viewer.pan += viewer_pan_delta;
+            }
+
+            // Edge snap when drag ends (only if image is larger than screen)
+            if viewer_drag_ended && !self.show_browser {
+                let snap_threshold = 30.0;
+                let img_size = self.image_viewer.image_size;
+                let zoom = self.image_viewer.zoom;
+
+                // Calculate rotated size
+                let rotated_size = if self.image_viewer.rotation == 90 || self.image_viewer.rotation == 270 {
+                    egui::Vec2::new(img_size.y, img_size.x)
+                } else {
+                    img_size
+                };
+
+                // Get screen size (approximate from last known size)
+                if let Some(window) = &self.window {
+                    let screen = window.inner_size();
+                    let screen_size = egui::Vec2::new(screen.width as f32, screen.height as f32);
+
+                    // Calculate display size after zoom
+                    let scale = match self.image_viewer.fit_mode {
+                        app_ui::components::viewer::FitMode::FitToWindow => {
+                            let scale_x = screen_size.x / rotated_size.x;
+                            let scale_y = screen_size.y / rotated_size.y;
+                            scale_x.min(scale_y)
+                        }
+                        app_ui::components::viewer::FitMode::FitWidth => screen_size.x / rotated_size.x,
+                        app_ui::components::viewer::FitMode::FitHeight => screen_size.y / rotated_size.y,
+                        app_ui::components::viewer::FitMode::OriginalSize => 1.0,
+                    };
+                    let display_size = rotated_size * scale * zoom;
+
+                    // Calculate image bounds
+                    let half_display = display_size * 0.5;
+                    let half_screen = screen_size * 0.5;
+                    let pan = self.image_viewer.pan;
+
+                    // Horizontal snap (only if image wider than screen)
+                    if display_size.x > screen_size.x {
+                        let left_edge = -pan.x - half_display.x;
+                        let right_edge = -pan.x + half_display.x;
+
+                        if left_edge.abs() < snap_threshold {
+                            self.image_viewer.pan.x = -half_display.x + half_screen.x;
+                        } else if (right_edge - screen_size.x).abs() < snap_threshold {
+                            self.image_viewer.pan.x = half_display.x - half_screen.x;
+                        }
+                    }
+
+                    // Vertical snap (only if image taller than screen)
+                    if display_size.y > screen_size.y {
+                        let top_edge = -pan.y - half_display.y;
+                        let bottom_edge = -pan.y + half_display.y;
+
+                        if top_edge.abs() < snap_threshold {
+                            self.image_viewer.pan.y = -half_display.y + half_screen.y;
+                        } else if (bottom_edge - screen_size.y).abs() < snap_threshold {
+                            self.image_viewer.pan.y = half_display.y - half_screen.y;
+                        }
+                    }
+                }
             }
 
             // Double-click to CLOSE viewer (return to browser)
@@ -1721,7 +1742,8 @@ impl App {
             ViewerAction::FirstImage => self.first_image(),
             ViewerAction::LastImage => self.last_image(),
             ViewerAction::ToggleFullscreen => {
-                self.show_browser = !self.show_browser;
+                // Toggle true fullscreen (borderless fullscreen mode)
+                self.toggle_fullscreen();
             }
             ViewerAction::ToggleSlideshow => {
                 self.image_viewer.slideshow_active = !self.image_viewer.slideshow_active;
