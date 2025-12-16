@@ -294,6 +294,30 @@ impl App {
         }
     }
 
+    /// Set fullscreen mode explicitly
+    fn set_fullscreen(&self, fullscreen: bool) {
+        if let Some(ref window) = self.window {
+            use winit::window::Fullscreen;
+            if fullscreen {
+                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            } else {
+                window.set_fullscreen(None);
+            }
+        }
+    }
+
+    /// Enter viewer mode (fullscreen, hide browser)
+    fn enter_viewer_mode(&mut self) {
+        self.show_browser = false;
+        self.set_fullscreen(true);
+    }
+
+    /// Exit viewer mode (windowed, show browser)
+    fn exit_viewer_mode(&mut self) {
+        self.show_browser = true;
+        self.set_fullscreen(false);
+    }
+
     /// Setup fonts for Japanese and Unicode support
     fn setup_fonts(&self) {
         let mut fonts = egui::FontDefinitions::default();
@@ -557,9 +581,10 @@ impl App {
             let generator = app_core::ThumbnailGenerator::new(128);
             for path in image_entries {
                 if let Ok(loaded) = generator.generate(path.as_path()) {
-                    // Use path-based hash for cache key (matches get_cached_sync lookup)
+                    // Use path-based hash with fixed dimensions (128x128)
+                    // This matches get_cached_sync lookup which uses ThumbnailSize::Small
                     let path_hash = path.id();
-                    let cache_key = app_db::CacheKey::new(path_hash, loaded.width, loaded.height);
+                    let cache_key = app_db::CacheKey::new(path_hash, 128, 128);
                     let _ = cache.put(cache_key, &loaded.data);
                 }
             }
@@ -624,9 +649,10 @@ impl App {
         rayon::spawn(move || {
             let generator = app_core::ThumbnailGenerator::new(128);
             if let Ok(loaded) = generator.generate(path.as_path()) {
-                // Store in cache using path-based hash (matches get_cached_sync lookup)
+                // Store in cache using path-based hash with fixed dimensions (128x128)
+                // This matches get_cached_sync lookup which uses ThumbnailSize::Small (128x128)
                 if let Some(ref cache) = cache {
-                    let cache_key = app_db::CacheKey::new(path_hash, loaded.width, loaded.height);
+                    let cache_key = app_db::CacheKey::new(path_hash, 128, 128);
                     let _ = cache.put(cache_key, &loaded.data);
                 }
                 // Request repaint to show the newly generated thumbnail
@@ -770,7 +796,7 @@ impl App {
                 self.enter_archive(entry.path);
             } else if entry.is_image() {
                 self.load_image(&entry);
-                self.show_browser = false; // Switch to viewer mode
+                self.enter_viewer_mode(); // Switch to viewer mode (fullscreen)
             }
         }
     }
@@ -794,7 +820,7 @@ impl App {
                                 self.on_select(first_image_idx);
                                 if let Some(img_entry) = self.file_entries.get(first_image_idx) {
                                     self.load_image(&img_entry.clone());
-                                    self.show_browser = false; // Viewer mode
+                                    self.enter_viewer_mode(); // Viewer mode (fullscreen)
                                 }
                             }
                         } else {
@@ -810,7 +836,7 @@ impl App {
             } else if entry.is_image() {
                 // Regular file - open in Viewer
                 self.load_image(&entry);
-                self.show_browser = false;
+                self.enter_viewer_mode(); // Viewer mode (fullscreen)
             } else if entry.is_archive() {
                 // Archive - open as directory
                 self.enter_archive(entry.path);
@@ -1437,7 +1463,7 @@ impl App {
                 self.image_viewer.pan += viewer_pan_delta;
             }
 
-            // Edge snap when drag ends (only if image is larger than screen)
+            // Edge snap when drag ends
             if viewer_drag_ended && !self.show_browser {
                 let snap_threshold = 30.0;
                 let img_size = self.image_viewer.image_size;
@@ -1450,7 +1476,7 @@ impl App {
                     img_size
                 };
 
-                // Get screen size (approximate from last known size)
+                // Get screen size
                 if let Some(window) = &self.window {
                     let screen = window.inner_size();
                     let screen_size = egui::Vec2::new(screen.width as f32, screen.height as f32);
@@ -1468,40 +1494,50 @@ impl App {
                     };
                     let display_size = rotated_size * scale * zoom;
 
-                    // Calculate image bounds
+                    // Image bounds in screen coordinates
+                    // pan is offset of image center from screen center
+                    // Image center = screen_center + pan
                     let half_display = display_size * 0.5;
                     let half_screen = screen_size * 0.5;
                     let pan = self.image_viewer.pan;
 
-                    // Horizontal snap (only if image wider than screen)
-                    if display_size.x > screen_size.x {
-                        let left_edge = -pan.x - half_display.x;
-                        let right_edge = -pan.x + half_display.x;
+                    // Image edges in screen coordinates:
+                    // left_edge = half_screen.x + pan.x - half_display.x
+                    // right_edge = half_screen.x + pan.x + half_display.x
+                    let left_edge = half_screen.x + pan.x - half_display.x;
+                    let right_edge = half_screen.x + pan.x + half_display.x;
+                    let top_edge = half_screen.y + pan.y - half_display.y;
+                    let bottom_edge = half_screen.y + pan.y + half_display.y;
 
-                        if left_edge.abs() < snap_threshold {
-                            self.image_viewer.pan.x = -half_display.x + half_screen.x;
-                        } else if (right_edge - screen_size.x).abs() < snap_threshold {
-                            self.image_viewer.pan.x = half_display.x - half_screen.x;
-                        }
+                    // Horizontal snap
+                    // Snap to left (image left edge near screen left = 0)
+                    if left_edge.abs() < snap_threshold {
+                        // Set pan so left_edge = 0: pan.x = half_display.x - half_screen.x
+                        self.image_viewer.pan.x = half_display.x - half_screen.x;
+                    }
+                    // Snap to right (image right edge near screen right = screen_size.x)
+                    else if (right_edge - screen_size.x).abs() < snap_threshold {
+                        // Set pan so right_edge = screen_size.x: pan.x = half_screen.x - half_display.x
+                        self.image_viewer.pan.x = half_screen.x - half_display.x;
                     }
 
-                    // Vertical snap (only if image taller than screen)
-                    if display_size.y > screen_size.y {
-                        let top_edge = -pan.y - half_display.y;
-                        let bottom_edge = -pan.y + half_display.y;
-
-                        if top_edge.abs() < snap_threshold {
-                            self.image_viewer.pan.y = -half_display.y + half_screen.y;
-                        } else if (bottom_edge - screen_size.y).abs() < snap_threshold {
-                            self.image_viewer.pan.y = half_display.y - half_screen.y;
-                        }
+                    // Vertical snap
+                    // Snap to top (image top edge near screen top = 0)
+                    if top_edge.abs() < snap_threshold {
+                        // Set pan so top_edge = 0: pan.y = half_display.y - half_screen.y
+                        self.image_viewer.pan.y = half_display.y - half_screen.y;
+                    }
+                    // Snap to bottom (image bottom edge near screen bottom = screen_size.y)
+                    else if (bottom_edge - screen_size.y).abs() < snap_threshold {
+                        // Set pan so bottom_edge = screen_size.y: pan.y = half_screen.y - half_display.y
+                        self.image_viewer.pan.y = half_screen.y - half_display.y;
                     }
                 }
             }
 
             // Double-click to CLOSE viewer (return to browser)
             if viewer_double_clicked {
-                self.show_browser = true;
+                self.exit_viewer_mode();
             }
 
             // Update overlay visibility based on mouse movement
@@ -1778,7 +1814,7 @@ impl App {
                 self.settings_dialog.open(config, None);
             }
             ViewerAction::Close => {
-                self.show_browser = true;
+                self.exit_viewer_mode();
             }
             ViewerAction::SeekTo(position) => {
                 // Seek to position in file list (0.0-1.0)
@@ -2092,7 +2128,7 @@ impl App {
                 true
             }
             CommandId::VIEW_PARENT => {
-                self.show_browser = true;
+                self.exit_viewer_mode();
                 true
             }
             CommandId::VIEW_FLIP => {
@@ -2300,8 +2336,8 @@ impl App {
                 true
             }
             CommandId::VIEW_TOGGLE_CHROMELESS => {
-                // Chromeless = no UI, just image
-                self.show_browser = false;
+                // Chromeless = no UI, just image (fullscreen)
+                self.enter_viewer_mode();
                 self.status.message = "Chromeless mode".to_string();
                 true
             }
