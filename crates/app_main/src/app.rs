@@ -463,11 +463,12 @@ impl App {
     /// Request thumbnails for all image files in current directory
     /// This pre-generates thumbnails in the background
     fn request_thumbnails_for_current_directory(&mut self) {
-        let Some(ref thumbnail_manager) = self.thumbnail_manager else {
+        let Some(ref cache) = self.thumbnail_cache else {
             return;
         };
 
-        let thumbnail_manager = thumbnail_manager.clone();
+        let cache = cache.clone();
+        let egui_ctx = self.egui_ctx.clone();
 
         // Collect image entries
         let image_entries: Vec<_> = self.file_entries.iter()
@@ -475,12 +476,17 @@ impl App {
             .map(|e| e.path.clone())
             .collect();
 
-        // Spawn async task to pre-generate thumbnails
-        tokio::spawn(async move {
+        // Spawn background thread to pre-generate thumbnails (no tokio runtime needed)
+        std::thread::spawn(move || {
+            let generator = app_core::ThumbnailGenerator::new(128);
             for path in image_entries {
-                // This will generate and cache thumbnails in the background
-                let _ = thumbnail_manager.get_thumbnail(path, ThumbnailSize::Small).await;
+                if let Ok(loaded) = generator.generate(path.as_path()) {
+                    let cache_key = app_db::CacheKey::new(loaded.hash, loaded.width, loaded.height);
+                    let _ = cache.put(cache_key, &loaded.data);
+                }
             }
+            // Request repaint after batch generation
+            egui_ctx.request_repaint();
         });
     }
 
@@ -517,13 +523,19 @@ impl App {
             return Some(texture_handle);
         }
 
-        // Not cached - request async generation
-        let thumbnail_manager = thumbnail_manager.clone();
+        // Not cached - request generation in background thread (no tokio runtime needed)
         let path = entry.path.clone();
         let egui_ctx = self.egui_ctx.clone();
+        let cache = self.thumbnail_cache.clone();
 
-        tokio::spawn(async move {
-            if let Ok(_) = thumbnail_manager.get_thumbnail(path, ThumbnailSize::Small).await {
+        std::thread::spawn(move || {
+            let generator = app_core::ThumbnailGenerator::new(128);
+            if let Ok(loaded) = generator.generate(path.as_path()) {
+                // Store in cache for future use
+                if let Some(ref cache) = cache {
+                    let cache_key = app_db::CacheKey::new(loaded.hash, loaded.width, loaded.height);
+                    let _ = cache.put(cache_key, &loaded.data);
+                }
                 // Request repaint to show the newly generated thumbnail
                 egui_ctx.request_repaint();
             }
@@ -1517,7 +1529,8 @@ impl App {
                 // TODO: Start/stop slideshow timer
             }
             ViewerAction::OpenSettings => {
-                self.settings_dialog.open = true;
+                let config = state().map(|s| s.config.read().clone()).unwrap_or_default();
+                self.settings_dialog.open(config, None);
             }
             ViewerAction::Close => {
                 self.show_browser = true;

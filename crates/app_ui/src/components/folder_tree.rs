@@ -239,17 +239,25 @@ impl FolderTree {
                             ui.add_space(18.0); // Space for alignment
                         }
 
-                        // Folder icon and name
+                        // Folder icon and name (truncate long names to prevent panel width changes)
                         let icon = if is_expanded { "📂" } else { "📁" };
+                        let max_name_chars = 20;
+                        let display_name = if node.name.chars().count() > max_name_chars {
+                            let truncated: String = node.name.chars().take(max_name_chars - 2).collect();
+                            format!("{}…", truncated)
+                        } else {
+                            node.name.clone()
+                        };
 
-                        let text = egui::RichText::new(format!("{} {}", icon, node.name));
+                        let text = egui::RichText::new(format!("{} {}", icon, display_name));
                         let text = if is_selected {
                             text.strong().color(egui::Color32::LIGHT_BLUE)
                         } else {
                             text
                         };
 
-                        let label_response = ui.selectable_label(is_selected, text);
+                        let label_response = ui.selectable_label(is_selected, text)
+                            .on_hover_text(&node.name); // Show full name on hover
 
                         if label_response.clicked() {
                             self.selected = Some(node.path.clone());
