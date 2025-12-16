@@ -37,6 +37,7 @@ egui-winit.workspace = true
 # Utils
 futures.workspace = true
 pollster = "0.3"
+rayon.workspace = true
 dirs-next = "2.0"
 image.workspace = true
 open = "5.0"

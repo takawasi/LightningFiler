@@ -107,9 +107,13 @@ impl Toolbar {
                     .font(egui::FontId::proportional(13.0))
             );
 
-            if path_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                action = Some(ToolbarAction::NavigateTo(state.path_text.clone()));
+            if path_response.lost_focus() {
+                // Always clear editing flag on any focus loss
                 state.editing_path = false;
+                // Only navigate if Enter was pressed
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    action = Some(ToolbarAction::NavigateTo(state.path_text.clone()));
+                }
             }
 
             if path_response.gained_focus() {

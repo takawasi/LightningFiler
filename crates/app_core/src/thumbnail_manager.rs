@@ -183,11 +183,13 @@ impl ThumbnailManager {
     }
 
     /// Get thumbnail synchronously if cached, otherwise return None
+    /// Uses path-based hash for fast lookup (doesn't read file content)
     pub fn get_cached_sync(&self, path: &Path, size: ThumbnailSize) -> Option<LoadedImage> {
-        let file_data = std::fs::read(path).ok()?;
-        let hash = xxh3_64(&file_data);
+        // Use path-based hash for fast lookup (no file I/O)
+        let path_str = path.to_string_lossy();
+        let path_hash = xxh3_64(path_str.as_bytes());
         let (width, height) = size.to_dimensions();
-        let cache_key = CacheKey::new(hash, width, height);
+        let cache_key = CacheKey::new(path_hash, width, height);
 
         // Check RocksDB cache
         let cached_data = self.cache.get(cache_key).ok()??;
@@ -198,16 +200,17 @@ impl ThumbnailManager {
             height,
             data: cached_data,
             format: crate::resource::ImageFormat::Rgba8,
-            hash,
+            hash: path_hash,
         })
     }
 
     /// Check if a thumbnail exists in cache
+    /// Uses path-based hash for fast lookup (doesn't read file content)
     pub fn has_cached(&self, path: &Path, size: ThumbnailSize) -> Result<bool, AppError> {
-        let file_data = std::fs::read(path)?;
-        let hash = xxh3_64(&file_data);
+        let path_str = path.to_string_lossy();
+        let path_hash = xxh3_64(path_str.as_bytes());
         let (width, height) = size.to_dimensions();
-        let cache_key = CacheKey::new(hash, width, height);
+        let cache_key = CacheKey::new(path_hash, width, height);
 
         Ok(self.cache.exists(cache_key)?)
     }

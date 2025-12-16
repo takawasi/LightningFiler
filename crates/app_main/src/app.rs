@@ -46,6 +46,8 @@ struct App {
 
     // Texture cache (path_hash -> TextureHandle)
     thumbnail_textures: HashMap<u64, egui::TextureHandle>,
+    // Track in-flight thumbnail generation to avoid duplicate work
+    pending_thumbnails: Arc<std::sync::Mutex<HashSet<u64>>>,
 
     // State
     show_browser: bool,
@@ -179,6 +181,7 @@ impl App {
             thumbnail_manager,
 
             thumbnail_textures: HashMap::new(),
+            pending_thumbnails: Arc::new(std::sync::Mutex::new(HashSet::new())),
 
             show_browser: true,
             status: StatusInfo {
@@ -549,12 +552,14 @@ impl App {
             .map(|e| e.path.clone())
             .collect();
 
-        // Spawn background thread to pre-generate thumbnails (no tokio runtime needed)
-        std::thread::spawn(move || {
+        // Use rayon thread pool for batch thumbnail generation
+        rayon::spawn(move || {
             let generator = app_core::ThumbnailGenerator::new(128);
             for path in image_entries {
                 if let Ok(loaded) = generator.generate(path.as_path()) {
-                    let cache_key = app_db::CacheKey::new(loaded.hash, loaded.width, loaded.height);
+                    // Use path-based hash for cache key (matches get_cached_sync lookup)
+                    let path_hash = path.id();
+                    let cache_key = app_db::CacheKey::new(path_hash, loaded.width, loaded.height);
                     let _ = cache.put(cache_key, &loaded.data);
                 }
             }
@@ -596,21 +601,40 @@ impl App {
             return Some(texture_handle);
         }
 
-        // Not cached - request generation in background thread (no tokio runtime needed)
+        // Check if already generating (avoid duplicate work)
+        {
+            let pending = self.pending_thumbnails.lock().unwrap();
+            if pending.contains(&path_hash) {
+                return None; // Already in-flight
+            }
+        }
+
+        // Mark as pending before spawning
+        {
+            let mut pending = self.pending_thumbnails.lock().unwrap();
+            pending.insert(path_hash);
+        }
+
+        // Use rayon thread pool (bounded) instead of unbounded std::thread::spawn
         let path = entry.path.clone();
         let egui_ctx = self.egui_ctx.clone();
         let cache = self.thumbnail_cache.clone();
+        let pending_thumbnails = self.pending_thumbnails.clone();
 
-        std::thread::spawn(move || {
+        rayon::spawn(move || {
             let generator = app_core::ThumbnailGenerator::new(128);
             if let Ok(loaded) = generator.generate(path.as_path()) {
-                // Store in cache for future use
+                // Store in cache using path-based hash (matches get_cached_sync lookup)
                 if let Some(ref cache) = cache {
-                    let cache_key = app_db::CacheKey::new(loaded.hash, loaded.width, loaded.height);
+                    let cache_key = app_db::CacheKey::new(path_hash, loaded.width, loaded.height);
                     let _ = cache.put(cache_key, &loaded.data);
                 }
                 // Request repaint to show the newly generated thumbnail
                 egui_ctx.request_repaint();
+            }
+            // Remove from pending set when done
+            if let Ok(mut pending) = pending_thumbnails.lock() {
+                pending.remove(&path_hash);
             }
         });
 
@@ -986,8 +1010,8 @@ impl App {
                     egui::SidePanel::left("folder_tree_panel")
                         .resizable(true)
                         .default_width(200.0)
-                        .min_width(150.0)
-                        .max_width(400.0)
+                        .min_width(80.0)
+                        .max_width(600.0)
                         .show_inside(ui, |ui| {
                             ui.heading("Folders");
                             ui.separator();
@@ -1620,8 +1644,8 @@ impl App {
                 egui::SidePanel::left("folder_tree_panel")
                     .resizable(true)
                     .default_width(200.0)
-                    .min_width(150.0)
-                    .max_width(400.0)
+                    .min_width(80.0)
+                    .max_width(600.0)
                     .show_inside(ui, |ui| {
                         ui.heading("Folders");
                         ui.separator();
