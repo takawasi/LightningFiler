@@ -13,6 +13,8 @@ pub enum SpreadMode {
 }
 
 /// Page position in spread
+/// Note: Reserved for future use in spread page placement logic
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PagePosition {
     Left,

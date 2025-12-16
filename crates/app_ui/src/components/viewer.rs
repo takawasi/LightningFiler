@@ -234,18 +234,25 @@ impl ImageViewer {
 
         // Left: File info
         let info_text = format!("{}", self.file_name);
+        let info_font = FontId::proportional(14.0);
         ui.painter().text(
             Pos2::new(top_bar.min.x + 12.0, top_bar.center().y),
             Align2::LEFT_CENTER,
             &info_text,
-            FontId::proportional(14.0),
+            info_font.clone(),
             Color32::WHITE,
         );
 
-        // Resolution (right of filename)
+        // Resolution (right of filename) - use proper text measurement
         if !self.resolution_text.is_empty() {
+            // Measure actual text width using egui's font system
+            let info_galley = ui.fonts(|f| {
+                f.layout_no_wrap(info_text.clone(), info_font, Color32::WHITE)
+            });
+            let info_width = info_galley.rect.width();
+
             ui.painter().text(
-                Pos2::new(top_bar.min.x + 12.0 + info_text.len() as f32 * 8.0 + 20.0, top_bar.center().y),
+                Pos2::new(top_bar.min.x + 12.0 + info_width + 20.0, top_bar.center().y),
                 Align2::LEFT_CENTER,
                 &self.resolution_text,
                 FontId::proportional(12.0),

@@ -496,7 +496,9 @@ impl NavigationState {
         let new_index = if current >= amount {
             current - amount
         } else if wrap {
-            count - (amount - current) % count
+            // Fix: when (amount - current) % count == 0, result should be 0, not count
+            let diff = (amount - current) % count;
+            if diff == 0 { 0 } else { count - diff }
         } else {
             0
         };

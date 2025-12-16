@@ -144,7 +144,8 @@ impl Dialog for RenameDialog {
 
                     // Enter で確定
                     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if !self.new_name.is_empty() && self.new_name != self.original_name {
+                        // Compare full name (with extension) to original, not just stem
+                        if !self.new_name.is_empty() && self.full_name() != self.original_name {
                             result = DialogResult::Ok(self.full_name());
                             self.open = false;
                         }

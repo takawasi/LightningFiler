@@ -7,11 +7,19 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 
 /// File system event types
+///
+/// Note: `Renamed` is defined for API completeness but is currently never
+/// produced because `notify_debouncer_mini` doesn't expose rename events
+/// directly. Rename operations appear as separate `Removed` + `Created` events.
+/// For actual rename detection, consider using `notify` directly with
+/// `EventKind::Modify(ModifyKind::Name(_))` or correlating Remove/Create pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsEvent {
     Created(PathBuf),
     Modified(PathBuf),
     Removed(PathBuf),
+    /// Reserved: Not currently produced by the watcher implementation
+    #[allow(dead_code)]
     Renamed { from: PathBuf, to: PathBuf },
 }
 

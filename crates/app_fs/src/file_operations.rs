@@ -362,8 +362,41 @@ impl FileOperations for DefaultFileOperations {
                 .ok_or_else(|| FileOpError::InvalidOperation("Invalid file name".to_string()))?;
             let target = target_dir.join(file_name);
 
-            std::fs::rename(source, &target)?;
-            tracing::info!("Moved: {} -> {}", source.display(), target.display());
+            // Try rename first (fast, same filesystem)
+            match std::fs::rename(source, &target) {
+                Ok(()) => {
+                    tracing::info!("Moved: {} -> {}", source.display(), target.display());
+                }
+                Err(e) => {
+                    // Check if it's a cross-filesystem error
+                    // Unix: EXDEV = 18, Windows: ERROR_NOT_SAME_DEVICE = 0x11 (17)
+                    let is_cross_device = match e.raw_os_error() {
+                        Some(18) => cfg!(unix),  // EXDEV on Unix
+                        Some(17) => cfg!(windows),  // ERROR_NOT_SAME_DEVICE on Windows
+                        _ => false,
+                    };
+
+                    if is_cross_device {
+                        // Fallback: copy + delete for cross-filesystem moves
+                        tracing::info!("Cross-filesystem move, using copy+delete: {} -> {}", source.display(), target.display());
+                        if source.is_dir() {
+                            // For directories, use recursive copy
+                            copy_dir_recursive(source, &target)?;
+                        } else {
+                            std::fs::copy(source, &target)?;
+                        }
+                        // Remove original after successful copy
+                        if source.is_dir() {
+                            std::fs::remove_dir_all(source)?;
+                        } else {
+                            std::fs::remove_file(source)?;
+                        }
+                        tracing::info!("Moved (copy+delete): {} -> {}", source.display(), target.display());
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
             moved_files.push(target);
         }
 

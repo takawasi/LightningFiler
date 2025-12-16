@@ -355,10 +355,12 @@ impl ThumbnailCatalog {
                 Vec2::new(item_size.x, 20.0),
             );
 
-            // Truncate name if too long
+            // Truncate name if too long (UTF-8 safe character-based truncation)
             let max_chars = (self.thumbnail_size / 8.0) as usize;
-            let display_name = if item.name.len() > max_chars {
-                format!("{}...", &item.name[..max_chars.saturating_sub(3)])
+            let char_count = item.name.chars().count();
+            let display_name = if char_count > max_chars {
+                let truncated: String = item.name.chars().take(max_chars.saturating_sub(3)).collect();
+                format!("{}...", truncated)
             } else {
                 item.name.clone()
             };

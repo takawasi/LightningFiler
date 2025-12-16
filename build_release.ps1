@@ -5,7 +5,13 @@ Write-Host "=== LightningFiler Release Build ===" -ForegroundColor Cyan
 
 # Environment check
 Write-Host "Checking toolchains..."
-rustup target list --installed | Select-String "x86_64-pc-windows-msvc"
+$targetInstalled = rustup target list --installed | Select-String "x86_64-pc-windows-msvc"
+if (-not $targetInstalled) {
+    Write-Host "Error: Target x86_64-pc-windows-msvc is not installed." -ForegroundColor Red
+    Write-Host "Run: rustup target add x86_64-pc-windows-msvc" -ForegroundColor Yellow
+    exit 1
+}
+Write-Host "Target x86_64-pc-windows-msvc is installed." -ForegroundColor Green
 
 # 64bit main app build
 Write-Host "`n[1/2] Building 64-bit main app..." -ForegroundColor Yellow

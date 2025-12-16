@@ -167,9 +167,12 @@ impl ThumbnailManager {
         let mut mem_cache = memory_cache.blocking_write();
         mem_cache.insert((loaded.hash, size), loaded.data.clone());
 
-        // Limit memory cache size (keep last 100 thumbnails)
+        // Limit memory cache size (keep ~100 thumbnails)
         if mem_cache.len() > 100 {
-            // Remove oldest entries (simple LRU approximation)
+            // Note: HashMap doesn't preserve insertion order, so this removes
+            // arbitrary entries rather than true LRU. For proper LRU behavior,
+            // consider using `indexmap::IndexMap` or `lru` crate.
+            // Current implementation is a simple size-based eviction.
             let keys_to_remove: Vec<_> = mem_cache.keys().take(20).cloned().collect();
             for key in keys_to_remove {
                 mem_cache.remove(&key);

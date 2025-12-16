@@ -365,12 +365,16 @@ impl MetadataDb {
             Some(json_str) => {
                 if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&json_str) {
                     json["label"] = serde_json::json!(label);
-                    serde_json::to_string(&json).unwrap_or_else(|_| format!(r#"{{"label":{:?}}}"#, label))
+                    serde_json::to_string(&json).unwrap_or_else(|_| {
+                        // Fallback: use proper JSON serialization
+                        serde_json::json!({"label": label}).to_string()
+                    })
                 } else {
-                    format!(r#"{{"label":{:?}}}"#, label)
+                    // Invalid existing JSON: create new properly formatted JSON
+                    serde_json::json!({"label": label}).to_string()
                 }
             }
-            None => format!(r#"{{"label":{:?}}}"#, label),
+            None => serde_json::json!({"label": label}).to_string(),
         };
 
         conn.execute(
